@@ -1,1205 +1,631 @@
-import pygame
+import tkinter as tk
+from tkinter import ttk, messagebox, scrolledtext
 import socket
 import threading
 import json
+import queue
 import time
+import uuid
+import os
 import sys
-import math
-from datetime import datetime
 
-# Config
+# Configuration
 HOST = "127.0.0.1"
 PORT = 5000
-FPS  = 60
+CLIENT_PORT = 5005  # Fixed local port to prevent multiple instances on same device
 
-# Dynamic resolution
-BASE_W, BASE_H = 2200, 1440
-
-# Palette
-C = {
-    "bg_night":   (6,  6, 16),
-    "bg_day":     (10, 14, 28),
-    "panel":      (18, 18, 32),
-    "panel2":     (24, 24, 40),
-    "panel3":     (30, 30, 50),
-    "border":     (55, 55, 85),
-    "border_hi":  (90, 90, 130),
-    "white":      (235, 235, 248),
-    "dim":        (110, 110, 145),
-    "dim2":       (75, 75, 105),
-    "accent":     (165, 90, 255),
-    "accent_hi":  (200, 130, 255),
-    "cyan":       (80, 195, 255),
-    "cyan_hi":    (130, 220, 255),
-    "red":        (215, 55, 55),
-    "red_dim":    (140, 35, 35),
-    "red_hi":     (255, 90, 90),
-    "gold":       (215, 175, 55),
-    "gold_hi":    (255, 210, 90),
-    "green":      (55, 195, 95),
-    "green_hi":   (90, 230, 130),
-    "wolf":       (200, 45, 45),
-    "wolf_hi":    (240, 80, 80),
-    "seer":       (70, 140, 225),
-    "seer_hi":    (110, 175, 255),
-    "villager":   (65, 190, 115),
-    "villager_hi":(100, 225, 150),
-    "timer_ok":   (55, 195, 95),
-    "timer_warn": (215, 175, 55),
-    "timer_crit": (215, 55, 55),
+# Color Themes
+THEMES = {
+    "lobby":  {"bg": "#1a1a2e", "panel": "#16213e", "accent": "#00d2ff", "text": "#e1e1e1"},
+    "night":  {"bg": "#0f0c29", "panel": "#302b63", "accent": "#e94560", "text": "#ffffff"},
+    "day":    {"bg": "#ece9e6", "panel": "#ffffff", "accent": "#243b55", "text": "#333333"},
+    "voting": {"bg": "#434343", "panel": "#000000", "accent": "#ff4d4d", "text": "#ffffff"},
+    "ended":  {"bg": "#1a1a2e", "panel": "#16213e", "accent": "#ffd700", "text": "#ffffff"}
 }
 
-def encode(data):
-    return (json.dumps(data) + "\n").encode("utf-8")
+def get_mac_address():
+    """Retrieve the device's MAC address."""
+    return ':'.join(['{:02x}'.format((uuid.getnode() >> ele) & 0xff)
+                     for ele in range(0, 8*6, 8)][::-1])
 
-def ts():
-    return datetime.now().strftime("%H:%M:%S")
-
-# Network
-class Net:
-    def __init__(self):
+class NetClient:
+    def __init__(self, host, port, packet_queue):
+        self.host = host
+        self.port = port
+        self.packet_queue = packet_queue
         self.sock = None
         self.connected = False
-        self._buf = ""
-        self._q = []
-        self._lock = threading.Lock()
+        self.running = False
+        self.mac = get_mac_address()
 
-    def connect(self, host, port):
-        self.sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        self.sock.settimeout(5)
-        self.sock.connect((host, port))
-        self.sock.settimeout(None)
-        self.connected = True
-        threading.Thread(target=self._recv, daemon=True).start()
-
-    def send(self, d):
-        if self.connected:
+    def connect(self):
+        try:
+            self.sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            self.sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            
+            # Bind to a fixed local port to enforce single instance per device
             try:
-                self.sock.sendall(encode(d))
-            except Exception:
+                self.sock.bind(("", CLIENT_PORT))
+            except socket.error:
+                # Need to use a temporary root for messagebox if app isn't ready
+                temp_root = tk.Tk()
+                temp_root.withdraw()
+                messagebox.showerror("Error", f"Another instance of the game is already running on this device (Port {CLIENT_PORT} is busy).")
+                temp_root.destroy()
+                return False
+
+            self.sock.settimeout(5)
+            self.sock.connect((self.host, self.port))
+            self.sock.settimeout(None)
+            self.connected = True
+            self.running = True
+            threading.Thread(target=self._recv_loop, daemon=True).start()
+            
+            # Auto-identify to server immediately
+            self.send({"type": "identify"})
+            
+            return True
+        except Exception as e:
+            # For general connection errors, we don't necessarily exit, but for bind errors we did above
+            print(f"Connection error: {e}")
+            return False
+
+    def send(self, data):
+        if self.connected:
+            # Auto-include MAC in every packet for reliability, though login is primary
+            data["mac"] = self.mac
+            try:
+                self.sock.sendall((json.dumps(data) + "\n").encode("utf-8"))
+            except Exception as e:
+                print(f"Send error: {e}")
                 self.connected = False
 
-    def _recv(self):
-        while self.connected:
+    def _recv_loop(self):
+        buffer = ""
+        while self.running:
             try:
-                data = self.sock.recv(8192)
+                data = self.sock.recv(4096)
                 if not data:
                     self.connected = False
                     break
-                self._buf += data.decode("utf-8", errors="ignore")
-                while "\n" in self._buf:
-                    line, self._buf = self._buf.split("\n", 1)
+                buffer += data.decode("utf-8", errors="ignore")
+                while "\n" in buffer:
+                    line, buffer = buffer.split("\n", 1)
                     line = line.strip()
                     if line:
                         try:
-                            pkt = json.loads(line)
-                            with self._lock:
-                                self._q.append(pkt)
+                            packet = json.loads(line)
+                            self.packet_queue.put(packet)
                         except Exception:
                             pass
             except Exception:
                 self.connected = False
                 break
+        self.running = False
 
-    def poll(self):
-        with self._lock:
-            items = list(self._q)
-            self._q.clear()
-        return items
-
-    def ping(self):
-        self.send({"type": "ping", "t": time.time()})
+    def disconnect(self):
+        self.running = False
+        if self.sock:
+            self.sock.close()
 
 
-# UI
-def draw_rect_alpha(surf, color, rect, alpha=180, radius=8):
-    s = pygame.Surface((rect[2], rect[3]), pygame.SRCALPHA)
-    pygame.draw.rect(s, (*color, alpha), (0, 0, rect[2], rect[3]), border_radius=radius)
-    surf.blit(s, (rect[0], rect[1]))
-
-def draw_panel(surf, x, y, w, h, bg=None, border=None, radius=10):
-    bg    = bg     or C["panel"]
-    border= border or C["border"]
-    pygame.draw.rect(surf, bg,     (x, y, w, h), border_radius=radius)
-    pygame.draw.rect(surf, border, (x, y, w, h), 1, border_radius=radius)
-
-def draw_text(surf, text, font, color, x, y, cx=False, cy=False, max_w=None):
-    if max_w:
-        # truncate
-        while font.size(text)[0] > max_w and len(text) > 4:
-            text = text[:-4] + "…"
-    t = font.render(str(text), True, color)
-    rx = x - t.get_width()//2  if cx else x
-    ry = y - t.get_height()//2 if cy else y
-    surf.blit(t, (rx, ry))
-    return t.get_width()
-
-def lerp_color(a, b, t):
-    return tuple(int(a[i] + (b[i] - a[i]) * t) for i in range(3))
-
-
-class Button:
-    def __init__(self, rect, label, bg, bg_h=None, fg=None, font=None, radius=8):
-        self.rect   = pygame.Rect(rect)
-        self.label  = label
-        self.bg     = bg
-        self.bg_h   = bg_h or tuple(min(255, c+45) for c in bg)
-        self.fg     = fg  or C["white"]
-        self.font   = font
-        self.radius = radius
-        self.enabled= True
-        self._hover = False
-        self._press = 0.0   # animation
-
-    def update(self, mx, my, dt):
-        self._hover = self.rect.collidepoint(mx, my) and self.enabled
-        target = 1.0 if self._hover else 0.0
-        self._press += (target - self._press) * min(1.0, dt * 12)
-
-    def draw(self, surf):
-        bg = lerp_color(self.bg, self.bg_h, self._press) if self.enabled else C["border"]
-        pygame.draw.rect(surf, bg, self.rect, border_radius=self.radius)
-        border_c = C["white"] if self.enabled else C["dim2"]
-        pygame.draw.rect(surf, border_c, self.rect, 1, border_radius=self.radius)
-        if self.font:
-            fg = self.fg if self.enabled else C["dim"]
-            draw_text(surf, self.label, self.font, fg,
-                      self.rect.centerx, self.rect.centery, cx=True, cy=True)
-
-    def clicked(self, event):
-        return (self.enabled and event.type == pygame.MOUSEBUTTONDOWN
-                and event.button == 1 and self.rect.collidepoint(event.pos))
-
-
-class InputBox:
-    def __init__(self, rect, placeholder="", font=None, max_len=48, password=False):
-        self.rect   = pygame.Rect(rect)
-        self.text   = ""
-        self.ph     = placeholder
-        self.font   = font
-        self.max_len= max_len
-        self.pw     = password
-        self.active = False
-        self._cursor_t = 0.0
-
-    def handle(self, event):
-        if event.type == pygame.MOUSEBUTTONDOWN:
-            self.active = self.rect.collidepoint(event.pos)
-        if event.type == pygame.KEYDOWN and self.active:
-            if event.key == pygame.K_BACKSPACE:
-                self.text = self.text[:-1]
-            elif event.key not in (pygame.K_RETURN, pygame.K_ESCAPE, pygame.K_TAB):
-                if len(self.text) < self.max_len:
-                    self.text += event.unicode
-            return event.key == pygame.K_RETURN
-        return False
-
-    def update(self, dt):
-        self._cursor_t += dt
-
-    def draw(self, surf):
-        bc = C["accent"] if self.active else C["border"]
-        pygame.draw.rect(surf, C["bg_night"], self.rect, border_radius=6)
-        pygame.draw.rect(surf, bc,            self.rect, 2, border_radius=6)
-        if self.font:
-            disp  = ("•" * len(self.text) if self.pw else self.text) if self.text else self.ph
-            color = C["white"] if self.text else C["dim"]
-            txt   = self.font.render(disp, True, color)
-            py    = self.rect.y + (self.rect.h - txt.get_height()) // 2
-            surf.blit(txt, (self.rect.x + 12, py))
-            # cursor
-            if self.active and int(self._cursor_t * 2) % 2 == 0:
-                cx = self.rect.x + 12 + txt.get_width() + 2
-                pygame.draw.line(surf, C["accent"], (cx, py+2), (cx, py+txt.get_height()-2), 2)
-
-    def clear(self):
-        self.text = ""
-
-
-# PlayerCard
-class PlayerCard:
-    """Clickable player card in the player panel."""
-    def __init__(self, username, role_hint=""):
-        self.username  = username
-        self.alive     = True
-        self.is_host   = False
-        self.role_hint = role_hint  # only shown if we know it
-        self.rect      = pygame.Rect(0, 0, 0, 0)
-        self._hover    = False
-        self._anim     = 0.0
-
-    def update(self, mx, my, dt):
-        self._hover = self.rect.collidepoint(mx, my) and self.alive
-        t = 1.0 if self._hover else 0.0
-        self._anim += (t - self._anim) * min(1, dt * 14)
-
-    def draw(self, surf, font_name, font_sm, font_xs, action_label, action_color,
-             is_me=False, vote_tally=0, total_votes=0):
-        x, y, w, h = self.rect
-
-        # Background
-        if not self.alive:
-            bg     = (12, 12, 22)
-            border = C["dim2"]
-        elif is_me:
-            bg     = lerp_color(C["panel2"], C["panel3"], self._anim)
-            border = lerp_color(C["accent"], C["accent_hi"], self._anim)
-        else:
-            bg     = lerp_color(C["panel"], C["panel2"], self._anim)
-            border = lerp_color(C["border"], C["border_hi"], self._anim)
-
-        pygame.draw.rect(surf, bg,     self.rect, border_radius=10)
-        pygame.draw.rect(surf, border, self.rect, 2, border_radius=10)
-
-        # Avatar circle
-        av_r  = h // 2 - 8
-        av_cx = x + 16 + av_r
-        av_cy = y + h // 2
-        av_c  = C["dim2"] if not self.alive else (C["wolf"] if "Wolf" in self.role_hint else
-                (C["seer"] if "Seer" in self.role_hint else C["accent"]))
-        pygame.draw.circle(surf, av_c, (av_cx, av_cy), av_r)
-        init = self.username[0].upper()
-        draw_text(surf, init, font_name, C["white"], av_cx, av_cy, cx=True, cy=True)
-
-        # Name
-        name_x = av_cx + av_r + 14
-        name_c = C["gold"] if is_me else (C["dim"] if not self.alive else C["white"])
-        draw_text(surf, self.username, font_name, name_c, name_x, y + 10, max_w=w - 200)
-
-        # Tags
-        tags = []
-        if is_me:
-            tags.append(("YOU", C["gold"]))
-        if self.is_host:
-            tags.append(("HOST", C["cyan"]))
-        if not self.alive:
-            tags.append(("DEAD", C["dim"]))
-        if self.role_hint:
-            rc = C["wolf"] if "Wolf" in self.role_hint else (C["seer"] if "Seer" in self.role_hint else C["villager"])
-            tags.append((self.role_hint.upper(), rc))
-
-        tx = name_x
-        for tag, tc in tags:
-            tw = font_xs.size(tag)[0] + 10
-            tag_rect = pygame.Rect(tx, y + h - 26, tw, 18)
-            pygame.draw.rect(surf, (*tc, 40), tag_rect, border_radius=4)
-            pygame.draw.rect(surf, tc, tag_rect, 1, border_radius=4)
-            draw_text(surf, tag, font_xs, tc, tag_rect.centerx, tag_rect.centery, cx=True, cy=True)
-            tx += tw + 6
-
-        # Vote bar
-        if vote_tally > 0 and total_votes > 0:
-            bar_w  = w - 20
-            bar_h  = 5
-            bar_y  = y + h - 6
-            fill_w = int(bar_w * vote_tally / total_votes)
-            pygame.draw.rect(surf, C["dim2"],   (x + 10, bar_y, bar_w, bar_h), border_radius=2)
-            pygame.draw.rect(surf, C["red_hi"], (x + 10, bar_y, fill_w, bar_h), border_radius=2)
-            draw_text(surf, f"{vote_tally}✗", font_xs, C["red_hi"],
-                      x + w - 50, bar_y - 3)
-
-        # Action button
-        if action_label and self.alive and not is_me:
-            btn_w  = 110
-            btn_h  = 36
-            btn_x  = x + w - btn_w - 10
-            btn_y  = y + (h - btn_h) // 2
-            btn_r  = pygame.Rect(btn_x, btn_y, btn_w, btn_h)
-            hover  = btn_r.collidepoint(pygame.mouse.get_pos())
-            bg2    = lerp_color(action_color, tuple(min(255,c+50) for c in action_color),
-                                1.0 if hover else 0.0)
-            pygame.draw.rect(surf, bg2,      btn_r, border_radius=6)
-            pygame.draw.rect(surf, C["white"],btn_r, 1,  border_radius=6)
-            draw_text(surf, action_label, font_sm, C["white"],
-                      btn_r.centerx, btn_r.centery, cx=True, cy=True)
-            return btn_r   # return for click detection
-        return None
-
-
-# Timer Widget
-def draw_timer(surf, cx, cy, radius, seconds, total, phase, font_big, font_sm):
-    if total <= 0:
-        return
-    frac  = max(0.0, seconds / total)
-    angle = -math.pi/2
-    sweep = 2 * math.pi * frac
-
-    # Track
-    pygame.draw.circle(surf, C["panel2"], (cx, cy), radius, 6)
-
-    # Arc (draw as polygon approx)
-    if frac > 0.001:
-        color = C["timer_ok"] if frac > 0.4 else (C["timer_warn"] if frac > 0.2 else C["timer_crit"])
-        pts = []
-        steps = max(6, int(60 * frac))
-        for i in range(steps + 1):
-            a = angle + sweep * i / steps
-            pts.append((cx + radius * math.cos(a), cy + radius * math.sin(a)))
-        if len(pts) >= 2:
-            pygame.draw.lines(surf, color, False, pts, 8)
-
-        # Glow dot at end
-        ea  = angle + sweep
-        ex  = cx + radius * math.cos(ea)
-        ey  = cy + radius * math.sin(ea)
-        pygame.draw.circle(surf, color, (int(ex), int(ey)), 10)
-
-    # Center text
-    draw_text(surf, str(seconds), font_big, C["white"], cx, cy, cx=True, cy=True)
-    phase_labels = {"night": "NIGHT", "day": "DAY", "voting": "VOTE"}
-    draw_text(surf, phase_labels.get(phase, phase.upper()), font_sm, C["dim"],
-              cx, cy + 32, cx=True)
-
-
-# Main Client
-class WerewolfGame:
+class WerewolfClient(tk.Tk):
     def __init__(self):
-        pygame.init()
-        info = pygame.display.Info()
-        # Use 90% of screen or BASE dimensions
-        sw = min(BASE_W, int(info.current_w * 0.93))
-        sh = min(BASE_H, int(info.current_h * 0.93))
-        self.W, self.H = sw, sh
-        self.screen = pygame.display.set_mode((self.W, self.H), pygame.RESIZABLE)
-        pygame.display.set_caption("🐺  Werewolf: Azrael of the Night")
-        self.clock  = pygame.time.Clock()
+        super().__init__()
+        self.withdraw() # Hide until connection confirmed
+        
+        self.title("Werewolf: Azrael of the Night")
+        self.geometry("1000x750")
+        self.configure(bg="#1a1a2e")
 
-        # Scale factor relative to BASE
-        self.sx = self.W / BASE_W
-        self.sy = self.H / BASE_H
+        self.packet_queue = queue.Queue()
+        self.net = NetClient(HOST, PORT, self.packet_queue)
+        
+        self.username = ""
+        self.room_code = ""
+        self.is_host = False
+        self.players = []
+        self.phase = "lobby"
+        self.role = ""
+        self.alive = True
+        self.timer = 0
+        self.timer_total = 60
+        self.is_ready = False
+        self.game_results = None
 
-        self._init_fonts()
-        self._init_state()
-        self._init_ui()
+        self._load_session()
 
-        # Auto-connect
-        self._do_connect()
+        self.current_frame = None
+        self._setup_styles()
+        
+        # CRITICAL: Exit immediately if binding/connection fails
+        if not self.net.connect():
+            self.destroy()
+            sys.exit(1)
+        
+        self.deiconify() # Show window
+        self.show_main_menu()
+        
+        self.after(100, self._process_packets)
 
-    def _s(self, n):
-        """Scale a size value."""
-        return max(1, int(n * min(self.sx, self.sy)))
-
-    def _init_fonts(self):
-        s = min(self.sx, self.sy)
-        self.f_title = pygame.font.SysFont("monospace", int(52*s), bold=True)
-        self.f_lg    = pygame.font.SysFont("monospace", int(34*s), bold=True)
-        self.f_md    = pygame.font.SysFont("monospace", int(24*s))
-        self.f_sm    = pygame.font.SysFont("monospace", int(20*s))
-        self.f_xs    = pygame.font.SysFont("monospace", int(16*s))
-        self.f_xxs   = pygame.font.SysFont("monospace", int(13*s))
-        self.f_timer = pygame.font.SysFont("monospace", int(42*s), bold=True)
-
-    def _init_state(self):
-        self.net          = Net()
-        self.state        = "login"   # login, lobby, game
-        self.username     = ""
-        self.role         = ""
-        self.team         = ""
-        self.room         = ""
-        self.is_host      = False
-        self.phase        = "lobby"
-        self.round_n      = 0
-        self.alive        = True
-        self.players      = []   # list of dicts from server
-        self.wolves       = []
-        self.vote_tally   = {}   # target -> count
-        self.voted        = False
-        self.seer_checked = set()
-        self.seer_results = {}   # target -> bool (is_wolf)
-        self.kill_target  = None  # wolf's current selection
-        self.messages     = []   # (text, color, time)
-        self.max_msgs     = 150
-        self.ping_ms      = 0
-        self.last_ping    = 0.0
-        self.timer_sec    = 0
-        self.timer_total  = 0
-        self.notif        = ""
-        self.notif_t      = 0.0
-        self.rooms_list   = []
-        self.game_over    = None  # {"winner":..,"roles":..}
-        self._refresh_t   = 0.0
-        self._anim_t      = 0.0
-
-    def _init_ui(self):
-        W, H = self.W, self.H
-        cx   = W // 2
-
-        # Login
-        iw = self._s(420)
-        ih = self._s(58)
-        self.inp_user = InputBox((cx - iw//2, H//2 - ih//2, iw, ih),
-                                  "Enter your name…", self.f_md)
-        self.btn_enter = Button((cx - self._s(120), H//2 + self._s(50), self._s(240), self._s(58)),
-                                 "ENTER GAME", C["accent"], font=self.f_md)
-
-        # Lobby
-        rw = self._s(460)
-        self.inp_room = InputBox((self._s(20), self._s(110), rw, ih),
-                                  "Room name…", self.f_md)
-        bw = self._s(160)
-        bh = self._s(52)
-        self.btn_create  = Button((self._s(20)+rw+self._s(14), self._s(108), bw, bh), "CREATE",  C["green"],  font=self.f_sm)
-        self.btn_join    = Button((self._s(20)+rw+bw+self._s(28), self._s(108), bw, bh), "JOIN", C["cyan"],   font=self.f_sm)
-        self.btn_refresh = Button((self._s(20)+rw+bw*2+self._s(42), self._s(108), bw, bh), "REFRESH", C["panel3"], font=self.f_sm)
-        self.btn_start   = Button((W//2 - self._s(160), H - self._s(90), self._s(320), self._s(68)), "▶  START GAME", C["green"], font=self.f_lg)
-        self.btn_leave   = Button((W - self._s(200), H - self._s(90), self._s(180), self._s(60)), "LEAVE", C["red_dim"], font=self.f_sm)
-
-        # Game chat input
-        chat_h = self._s(56)
-        cw     = int(W * 0.52)
-        self.inp_chat = InputBox((self._s(10), H - chat_h - self._s(10), cw - self._s(20), chat_h),
-                                  "Type message…", self.f_sm, max_len=120)
-        self.btn_send = Button((cw - self._s(10), H - chat_h - self._s(10), self._s(120), chat_h),
-                                "SEND", C["accent"], font=self.f_sm)
-
-        # Player cards (will be rebuilt dynamically)
-        self.player_cards = {}   # username -> PlayerCard
-
-    def _do_connect(self):
+    def _save_session(self):
         try:
-            self.net.connect(HOST, PORT)
-            self.notify("Connected to server!", C["green"])
-        except Exception as e:
-            self.notify(f"Cannot connect: {e}  (is server running?)", C["red"])
+            with open(".last_session.json", "w") as f:
+                json.dump({"room": self.room_code, "user": self.username}, f)
+        except:
+            pass
 
-    # Main Loop
+    def _load_session(self):
+        if os.path.exists(".last_session.json"):
+            try:
+                with open(".last_session.json", "r") as f:
+                    data = json.load(f)
+                    self.room_code = data.get("room", "")
+                    self.username = data.get("user", "")
+            except:
+                pass
 
-    def run(self):
-        while True:
-            dt = self.clock.tick(FPS) / 1000.0
-            self._handle_events(dt)
-            self._process_net()
-            self._update(dt)
-            self._draw()
-            pygame.display.flip()
+    def _setup_styles(self):
+        style = ttk.Style()
+        style.theme_use('clam')
+        
+        self.font_title = ("Helvetica", 32, "bold")
+        self.font_header = ("Helvetica", 20, "bold")
+        self.font_main = ("Helvetica", 12)
+        self.font_bold = ("Helvetica", 12, "bold")
+        self.font_chat = ("Courier", 11)
+        self.font_timer = ("Helvetica", 18, "bold")
 
-    def _handle_events(self, dt):
-        mx, my = pygame.mouse.get_pos()
+        style.configure("TFrame", background="#1a1a2e")
+        style.configure("TLabel", background="#1a1a2e", foreground="#e1e1e1", font=self.font_main)
+        style.configure("TButton", font=self.font_bold, padding=10)
+        
+        style.configure("Timer.Horizontal.TProgressbar", 
+                        thickness=15, 
+                        troughcolor="#16213e", 
+                        background="#00d2ff",
+                        bordercolor="#16213e",
+                        lightcolor="#00d2ff",
+                        darkcolor="#00d2ff")
 
-        for event in pygame.event.get():
-            if event.type == pygame.QUIT:
-                pygame.quit(); sys.exit()
-            if event.type == pygame.VIDEORESIZE:
-                self.W, self.H = event.w, event.h
-                self.sx = self.W / BASE_W
-                self.sy = self.H / BASE_H
-                self.screen = pygame.display.set_mode((self.W, self.H), pygame.RESIZABLE)
-                self._init_fonts()
-                self._init_ui()
+    def update_theme(self, phase):
+        theme = THEMES.get(phase, THEMES["lobby"])
+        self.configure(bg=theme["bg"])
+        if self.current_frame:
+            self.current_frame.configure(bg=theme["bg"])
+            if hasattr(self.current_frame, "apply_theme"):
+                self.current_frame.apply_theme(theme)
 
-            if self.state == "login":
-                self._ev_login(event)
-            elif self.state == "lobby":
-                self._ev_lobby(event)
-            elif self.state == "game":
-                self._ev_game(event)
+    def switch_frame(self, frame_class):
+        if self.current_frame:
+            self.current_frame.destroy()
+        self.current_frame = frame_class(self)
+        self.current_frame.pack(fill="both", expand=True)
+        self.update_theme(self.phase)
 
-        # Hover updates
-        if self.state == "login":
-            self.btn_enter.update(mx, my, dt)
-            self.inp_user.update(dt)
-        elif self.state == "lobby":
-            for btn in (self.btn_create, self.btn_join, self.btn_refresh,
-                        self.btn_start, self.btn_leave):
-                btn.update(mx, my, dt)
-            self.inp_room.update(dt)
-        elif self.state == "game":
-            self.btn_send.update(mx, my, dt)
-            self.inp_chat.update(dt)
-            for card in self.player_cards.values():
-                card.update(mx, my, dt)
+    def _process_packets(self):
+        while not self.packet_queue.empty():
+            packet = self.packet_queue.get()
+            self._handle_packet(packet)
+        self.after(100, self._process_packets)
 
-    def _ev_login(self, event):
-        submitted = self.inp_user.handle(event)
-        if self.btn_enter.clicked(event) or submitted:
-            uname = self.inp_user.text.strip()
-            if len(uname) >= 2:
-                self.net.send({"type": "login", "username": uname})
+    def _handle_packet(self, packet):
+        ptype = packet.get("type")
+        if ptype == "login_ok":
+            self.username = packet["username"]
+            self._save_session()
+            if packet.get("reconnect"):
+                # Reconnection detected!
+                self.show_game_screen()
             else:
-                self.notify("Name must be at least 2 characters", C["red"])
+                self.show_lobby()
+        elif ptype == "room_joined":
+            self.room_code = packet["room"]
+            self._save_session()
+            self.is_host = packet.get("host", False)
+            self.players = packet.get("players", [])
+            self.show_username_selection()
+        elif ptype == "players_list":
+            self.players = packet.get("players", [])
+            self.phase = packet.get("phase", "lobby")
+            if hasattr(self.current_frame, "update_players"):
+                self.current_frame.update_players(self.players)
+        elif ptype == "phase_change":
+            self.phase = packet["phase"]
+            self.timer_total = packet.get("duration", 60)
+            if self.phase not in ["lobby", "ended"]:
+                if not isinstance(self.current_frame, GameFrame):
+                    self.show_game_screen()
+            self.update_theme(self.phase)
+            if hasattr(self.current_frame, "update_phase"):
+                self.current_frame.update_phase(packet)
+        elif ptype == "timer":
+            self.timer = packet["seconds"]
+            if "duration" in packet:
+                self.timer_total = packet["duration"]
+            if hasattr(self.current_frame, "update_timer"):
+                self.current_frame.update_timer(self.timer)
+        elif ptype == "chat":
+            if hasattr(self.current_frame, "add_chat"):
+                self.current_frame.add_chat(packet)
+        elif ptype == "system":
+            if hasattr(self.current_frame, "add_system_msg"):
+                self.current_frame.add_system_msg(packet.get("msg", ""))
+        elif ptype == "role_assigned":
+            self.role = packet["role"]
+            if hasattr(self.current_frame, "set_role"):
+                self.current_frame.set_role(self.role)
+        elif ptype == "seer_result":
+            if hasattr(self.current_frame, "add_seer_result"):
+                self.current_frame.add_seer_result(packet)
+        elif ptype == "game_over":
+            self.game_results = packet
+            self.phase = "ended"
+            self.show_game_over()
+        elif ptype == "error":
+            messagebox.showerror("Error", packet.get("msg", "Unknown error"))
+        elif ptype == "left_room":
+            self.room_code = ""
+            self.phase = "lobby"
+            self.show_main_menu()
 
-    def _ev_lobby(self, event):
-        self.inp_room.handle(event)
-        if self.btn_create.clicked(event):
-            name = self.inp_room.text.strip()
-            if name:
-                self.net.send({"type": "create", "room": name})
-                self.inp_room.clear()
-        if self.btn_join.clicked(event):
-            name = self.inp_room.text.strip()
-            if name:
-                self.net.send({"type": "join", "room": name})
-                self.inp_room.clear()
-        if self.btn_refresh.clicked(event):
-            self.net.send({"type": "rooms"})
-        if self.btn_start.clicked(event) and self.is_host and self.room:
-            self.net.send({"type": "start"})
-        if self.btn_leave.clicked(event) and self.room:
-            self.net.send({"type": "leave"})
-        # Click room from list
-        if event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
-            mx, my = event.pos
-            for i, r in enumerate(self.rooms_list):
-                row_y = self._s(200) + i * self._s(52)
-                row_r = pygame.Rect(self._s(20), row_y, self.W - self._s(40), self._s(46))
-                if row_r.collidepoint(mx, my) and r["status"] == "Waiting":
-                    self.net.send({"type": "join", "room": r["name"]})
+    def show_main_menu(self):
+        self.phase = "lobby"
+        self.switch_frame(MainMenuFrame)
 
-    def _ev_game(self, event):
-        submitted = self.inp_chat.handle(event)
-        if self.btn_send.clicked(event) or submitted:
-            self._send_chat()
-        # Player card action buttons
-        if event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
-            mx, my = event.pos
-            for uname, card in self.player_cards.items():
-                if uname == self.username:
-                    continue
-                if not card.alive:
-                    continue
-                btn_r = self._card_action_rect(card)
-                if btn_r and btn_r.collidepoint(mx, my):
-                    self._do_action(uname)
+    def show_username_selection(self):
+        self.switch_frame(UsernameFrame)
 
-    def _card_action_rect(self, card):
-        """Returns the action button rect for a card if one should show."""
-        if not card.alive or card.username == self.username:
-            return None
-        x, y, w, h = card.rect
-        bw = self._s(120); bh = self._s(38)
-        return pygame.Rect(x + w - bw - self._s(10), y + (h - bh)//2, bw, bh)
+    def show_lobby(self):
+        self.phase = "lobby"
+        self.switch_frame(LobbyFrame)
 
-    def _do_action(self, target):
-        """Send appropriate action packet based on role/phase."""
-        if self.phase == "voting" and self.alive and not self.voted:
-            self.net.send({"type": "vote", "target": target})
-            self.voted = True
-            self.notify(f"Voted for {target}!", C["gold"])
-        elif self.phase == "night":
-            if self.role == "Werewolf" and self.alive:
-                self.net.send({"type": "kill", "target": target})
-                self.kill_target = target
-                self.notify(f"Targeting {target}…", C["wolf"])
-            elif self.role == "Seer" and self.alive and target not in self.seer_checked:
-                self.net.send({"type": "check", "target": target})
-                self.seer_checked.add(target)
-                self.notify(f"Checking {target}…", C["seer"])
+    def show_game_screen(self):
+        self.switch_frame(GameFrame)
 
-    def _send_chat(self):
-        text = self.inp_chat.text.strip()
-        self.inp_chat.clear()
-        if not text:
+    def show_game_over(self):
+        self.switch_frame(GameOverFrame)
+
+
+class MainMenuFrame(tk.Frame):
+    def __init__(self, master):
+        super().__init__(master, bg=THEMES["lobby"]["bg"])
+        self.master = master
+
+        tk.Label(self, text="WEREWOLF", font=self.master.font_title, bg=self.master["bg"], fg="#00d2ff").pack(pady=(150, 10))
+        tk.Label(self, text="Azrael of the Night", font=self.master.font_main, bg=self.master["bg"], fg="#e1e1e1").pack(pady=(0, 60))
+
+        tk.Label(self, text="Enter Room Code to Join:", font=self.master.font_main, bg=self.master["bg"], fg="#e1e1e1").pack(pady=5)
+        self.room_entry = ttk.Entry(self, font=self.master.font_header, width=15, justify="center")
+        self.room_entry.pack(pady=10)
+        
+        # Pre-fill room code if available
+        if self.master.room_code:
+            self.room_entry.insert(0, self.master.room_code)
+
+        btn_frame = tk.Frame(self, bg=self.master["bg"])
+        btn_frame.pack(pady=30)
+
+        ttk.Button(btn_frame, text="Join Room", width=18, command=self.join_room).pack(side="left", padx=15)
+        ttk.Button(btn_frame, text="Create New Room", width=18, command=self.create_room).pack(side="left", padx=15)
+
+    def join_room(self):
+        code = self.room_entry.get().strip().upper()
+        if not code:
+            messagebox.showwarning("Warning", "Please enter a room code")
             return
-        self.net.send({"type": "chat", "msg": text})
+        if not self.master.net.connected:
+            if not self.master.net.connect():
+                messagebox.showerror("Error", "Could not connect to server")
+                return
+        self.master.net.send({"type": "join", "room": code})
 
-    # Network Handling
-    def _process_net(self):
-        for pkt in self.net.poll():
-            pt = pkt.get("type")
-            fn = {
-                "login_ok":     self._p_login,
-                "room_joined":  self._p_room_joined,
-                "left_room":    self._p_left_room,
-                "rooms_list":   self._p_rooms_list,
-                "chat":         self._p_chat,
-                "system":       self._p_system,
-                "phase_change": self._p_phase,
-                "role_assigned":self._p_role,
-                "wolf_team":    self._p_wolf_team,
-                "vote_cast":    self._p_vote,
-                "eliminated":   self._p_elim,
-                "game_over":    self._p_game_over,
-                "error":        self._p_error,
-                "pong":         self._p_pong,
-                "players_list": self._p_players,
-                "seer_result":  self._p_seer,
-                "wolf_action":  self._p_wolf_action,
-                "kill_confirm": self._p_kill_confirm,
-                "rejoin":       self._p_rejoin,
-                "timer":        self._p_timer,
-            }.get(pt)
-            if fn:
-                fn(pkt)
+    def create_room(self):
+        if not self.master.net.connected:
+            if not self.master.net.connect():
+                messagebox.showerror("Error", "Could not connect to server")
+                return
+        self.master.net.send({"type": "create", "room": "AUTO"})
 
-    def _p_login(self, p):
-        self.username = p["username"]
-        self.state    = "lobby"
-        self.net.send({"type": "rooms"})
-        self.add_msg(f"Welcome, {self.username}!", C["green"])
 
-    def _p_room_joined(self, p):
-        self.room     = p["room"]
-        self.is_host  = p.get("host", False)
-        self._update_players(p.get("players", []))
-        self.add_msg(f"Joined room: {self.room}", C["cyan"])
+class UsernameFrame(tk.Frame):
+    def __init__(self, master):
+        super().__init__(master, bg=THEMES["lobby"]["bg"])
+        self.master = master
 
-    def _p_left_room(self, p):
-        self.room     = ""
-        self.is_host  = False
-        self.phase    = "lobby"
-        self.role     = ""
-        self.alive    = True
-        self.voted    = False
-        self.game_over= None
-        self.state    = "lobby"
-        self.net.send({"type": "rooms"})
+        tk.Label(self, text="WHO ARE YOU?", font=self.master.font_header, bg=self.master["bg"], fg="#00d2ff").pack(pady=(150, 30))
+        tk.Label(self, text=f"Joining Room: {self.master.room_code}", font=self.master.font_main, bg=self.master["bg"], fg="#e1e1e1").pack(pady=(0, 30))
 
-    def _p_rooms_list(self, p):
-        self.rooms_list = p.get("rooms", [])
+        self.user_entry = ttk.Entry(self, font=self.master.font_header, width=20, justify="center")
+        self.user_entry.pack(pady=10)
+        
+        # Pre-fill username if available
+        if self.master.username:
+            self.user_entry.insert(0, self.master.username)
+        
+        self.user_entry.focus_set()
 
-    def _p_chat(self, p):
-        sender = p.get("sender","?")
-        msg    = p.get("msg","")
-        if p.get("wolf_chat"):
-            self.add_msg(f"🐺 [Wolf] {sender}: {msg}", C["wolf"])
-        elif p.get("dead"):
-            self.add_msg(f"👻 [Dead] {sender}: {msg}", C["dim"])
-        else:
-            self.add_msg(f"💬 {sender}: {msg}", C["white"])
+        ttk.Button(self, text="Enter the Night", width=20, command=self.confirm_username).pack(pady=40)
 
-    def _p_system(self, p):
-        self.add_msg(f"⚡ {p.get('msg','')}", C["accent"])
-
-    def _p_phase(self, p):
-        phase    = p.get("phase","")
-        msg      = p.get("msg","")
-        duration = p.get("duration", 0)
-        self.phase       = phase
-        self.round_n     = p.get("round", self.round_n)
-        self.timer_total = duration
-        self.timer_sec   = duration
-        self.voted       = False
-        self.kill_target = None
-        self.vote_tally  = {}
-        if phase == "night":
-            self.seer_checked = set()
-
-        colors = {"night":C["accent"],"day":C["gold"],"voting":C["red"],"ended":C["green"]}
-        c = colors.get(phase, C["white"])
-        sep = "─" * 50
-        self.add_msg(sep, C["border"])
-        self.add_msg(f"  ◈ {phase.upper()} PHASE  —  Round {self.round_n}", c)
-        self.add_msg(f"  {msg}", C["white"])
-        self.add_msg(sep, C["border"])
-
-        if self.state != "game" and self.room:
-            self.state = "game"
-
-    def _p_role(self, p):
-        self.role = p.get("role","")
-        self.team = p.get("team","")
-        rc = C["wolf"] if self.team=="werewolf" else (C["seer"] if self.role=="Seer" else C["villager"])
-        self.add_msg("═"*50, rc)
-        self.add_msg(f"  YOUR ROLE: {self.role}", rc)
-        hints = {
-            "Werewolf": "Click a player at night to KILL them.",
-            "Seer":     "Click a player at night to REVEAL their role.",
-            "Villager": "Discuss and vote out the werewolves!",
-        }
-        self.add_msg(f"  {hints.get(self.role,'')}", C["dim"])
-        self.add_msg("═"*50, rc)
-        self.state = "game"
-
-    def _p_wolf_team(self, p):
-        self.wolves = p.get("wolves", [])
-        self.add_msg(f"🐺 Your pack: {', '.join(self.wolves)}", C["wolf"])
-
-    def _p_vote(self, p):
-        voter  = p.get("voter","")
-        target = p.get("target","")
-        votes  = p.get("votes", {})
-        self.add_msg(f"🗳️  {voter} → {target}", C["gold"])
-        # rebuild tally
-        tally = {}
-        for v in votes.values():
-            tally[v] = tally.get(v, 0) + 1
-        self.vote_tally = tally
-        self.net.send({"type": "players"})
-
-    def _p_elim(self, p):
-        player = p.get("player","")
-        role   = p.get("role","")
-        self.add_msg(f"💀 {p.get('msg','')}", C["red"])
-        # update role hint
-        if player in self.player_cards:
-            self.player_cards[player].role_hint = role
-            self.player_cards[player].alive = False
-        if player == self.username:
-            self.alive = False
-            self.add_msg("You were eliminated. Watch the game unfold…", C["dim"])
-        self.net.send({"type": "players"})
-
-    def _p_game_over(self, p):
-        self.game_over = p
-        winner = p.get("winner","")
-        roles  = p.get("roles", {})
-        # reveal all roles in cards
-        for uname, role in roles.items():
-            if uname in self.player_cards:
-                self.player_cards[uname].role_hint = role
-        self.add_msg("═"*50, C["gold"])
-        self.add_msg(f"  🏆 GAME OVER — {winner.upper()}S WIN!", C["gold"])
-        for uname, role in roles.items():
-            c = C["wolf"] if role == "Werewolf" else C["villager"]
-            self.add_msg(f"    {uname}: {role}", c)
-        self.add_msg("═"*50, C["gold"])
-        self.phase = "ended"
-        self.timer_sec = 0
-
-    def _p_error(self, p):
-        self.notify(p.get("msg","Error"), C["red"])
-
-    def _p_pong(self, p):
-        t = p.get("t", 0)
-        if t:
-            self.ping_ms = int((time.time() - t) * 1000)
-
-    def _p_players(self, p):
-        self._update_players(p.get("players", []))
-        ph = p.get("phase","")
-        if ph:
-            self.phase = ph
-
-    def _p_seer(self, p):
-        target  = p.get("target","")
-        is_wolf = p.get("is_werewolf", False)
-        self.seer_results[target] = is_wolf
-        c = C["wolf"] if is_wolf else C["green"]
-        self.add_msg(f"🔮 {p.get('msg','')}", c)
-        if target in self.player_cards:
-            self.player_cards[target].role_hint = "Werewolf" if is_wolf else "Innocent"
-
-    def _p_wolf_action(self, p):
-        self.add_msg(f"🐺 {p.get('msg','')}", C["wolf_hi"])
-
-    def _p_kill_confirm(self, p):
-        self.kill_target = p.get("target","")
-        self.add_msg(f"🎯 {p.get('msg','')}", C["wolf"])
-
-    def _p_rejoin(self, p):
-        self.room    = p.get("room","")
-        self.phase   = p.get("phase","")
-        self.round_n = p.get("round", 0)
-        self._update_players(p.get("players", []))
-        self.state   = "game"
-        self.net.send({"type": "players"})
-        self.add_msg(f"Rejoined room {self.room}", C["green"])
-
-    def _p_timer(self, p):
-        self.timer_sec = p.get("seconds", 0)
-
-    def _update_players(self, plist):
-        if not plist:
+    def confirm_username(self):
+        username = self.user_entry.get().strip()
+        if not username:
+            messagebox.showwarning("Warning", "Username cannot be empty")
             return
-        # Keep existing cards, update data
-        seen = set()
-        for pd in plist:
-            uname = pd["username"]
-            seen.add(uname)
-            if uname not in self.player_cards:
-                self.player_cards[uname] = PlayerCard(uname)
-            card = self.player_cards[uname]
-            card.alive   = pd.get("alive", True)
-            card.is_host = pd.get("host", False)
-        # Update alive flag for self
-        for pd in plist:
-            if pd["username"] == self.username:
-                self.alive = pd.get("alive", True)
-        self.players = plist
+        self.master.net.send({"type": "login", "username": username})
 
-    def add_msg(self, text, color=None):
-        color = color or C["white"]
-        self.messages.append((f"[{ts()}] {text}", color, time.time()))
-        if len(self.messages) > self.max_msgs:
-            self.messages.pop(0)
 
-    def notify(self, msg, color=None):
-        self.notif   = msg
-        self.notif_t = 4.0
-        self.add_msg(f"[!] {msg}", color or C["gold"])
+class LobbyFrame(tk.Frame):
+    def __init__(self, master):
+        super().__init__(master, bg=THEMES["lobby"]["bg"])
+        self.master = master
 
-    # Update
-    def _update(self, dt):
-        self._anim_t += dt
-        if self.notif_t > 0:
-            self.notif_t -= dt
-        # ping
-        now = time.time()
-        if now - self.last_ping > 4 and self.net.connected:
-            self.net.ping()
-            self.last_ping = now
-        # periodic room/player refresh
-        self._refresh_t += dt
-        if self._refresh_t > 3.0:
-            self._refresh_t = 0.0
-            if self.state == "lobby":
-                self.net.send({"type": "rooms"})
-            elif self.state == "game" and self.room:
-                self.net.send({"type": "players"})
+        self.header = tk.Frame(self, bg=self.master["bg"])
+        self.header.pack(fill="x", pady=40, padx=60)
 
-    # Draw 
-    def _draw(self):
-        W, H = self.W, self.H
-        if self.state == "login":
-            self._draw_login()
-        elif self.state == "lobby":
-            self._draw_lobby()
-        elif self.state == "game":
-            self._draw_game()
-        self._draw_notif()
-        # Connection status dot
-        dot_c = C["green"] if self.net.connected else C["red"]
-        pygame.draw.circle(self.screen, dot_c, (W - self._s(14), self._s(14)), self._s(8))
+        self.room_label = tk.Label(self.header, text=f"ROOM: {self.master.room_code}", font=self.master.font_header, bg=self.master["bg"], fg="#00d2ff")
+        self.room_label.pack(side="left")
+        
+        self.count_label = tk.Label(self.header, text="0 / 4 minimum players", font=self.master.font_main, bg=self.master["bg"], fg="#e1e1e1")
+        self.count_label.pack(side="right")
 
-    def _draw_bg(self, phase="night"):
-        W, H = self.W, self.H
-        bg = C["bg_night"] if phase == "night" else C["bg_day"]
-        self.screen.fill(bg)
-        # Starfield / subtle grid
-        gc = (14, 14, 28) if phase == "night" else (16, 20, 36)
-        step = self._s(80)
-        for x in range(0, W, step):
-            pygame.draw.line(self.screen, gc, (x, 0), (x, H))
-        for y in range(0, H, step):
-            pygame.draw.line(self.screen, gc, (0, y), (W, y))
+        self.list_frame = tk.Frame(self, bg="#16213e", padx=30, pady=30, highlightthickness=2, highlightbackground="#00d2ff")
+        self.list_frame.pack(fill="both", expand=True, padx=60, pady=10)
 
-    # ── Login Screen ───────────────────────────────────────────
-    def _draw_login(self):
-        W, H = self.W, self.H
-        self._draw_bg("night")
-        cx = W // 2
+        tk.Label(self.list_frame, text="SURVIVORS IN LOBBY:", font=self.master.font_bold, bg="#16213e", fg="#e1e1e1").pack(anchor="w", pady=(0, 15))
 
-        # Animated glow
-        glow_r = int(200 + 30 * math.sin(self._anim_t * 0.8))
-        glow_s = pygame.Surface((glow_r*2, glow_r*2), pygame.SRCALPHA)
-        pygame.draw.circle(glow_s, (165, 90, 255, 18), (glow_r, glow_r), glow_r)
-        self.screen.blit(glow_s, (cx - glow_r, H//2 - self._s(200) - glow_r))
+        self.player_listbox = tk.Listbox(self.list_frame, font=self.master.font_bold, bg="#16213e", fg="white", 
+                                         borderwidth=0, highlightthickness=0, selectbackground="#16213e")
+        self.player_listbox.pack(fill="both", expand=True)
 
-        draw_text(self.screen, "🐺  WEREWOLF", self.f_title, C["accent"],
-                  cx, H//2 - self._s(230), cx=True)
-        draw_text(self.screen, "AZRAEL  OF  THE  NIGHT", self.f_sm, C["dim"],
-                  cx, H//2 - self._s(165), cx=True)
+        self.footer = tk.Frame(self, bg=self.master["bg"])
+        self.footer.pack(fill="x", pady=40, padx=60)
 
-        # Panel
-        pw, ph = self._s(520), self._s(280)
-        draw_panel(self.screen, cx - pw//2, H//2 - self._s(80), pw, ph)
+        self.ready_btn = ttk.Button(self.footer, text="Ready", width=15, command=self.toggle_ready)
+        self.ready_btn.pack(side="left", padx=10)
 
-        draw_text(self.screen, "Enter your name to join", self.f_md, C["dim"],
-                  cx, H//2 - self._s(60), cx=True)
+        if self.master.is_host:
+            self.start_btn = ttk.Button(self.footer, text="Start Game", width=15, command=self.start_game)
+            self.start_btn.pack(side="left", padx=10)
 
-        # Reposition inputs
-        iw = self._s(420)
-        ih = self._s(58)
-        self.inp_user.rect = pygame.Rect(cx - iw//2, H//2 - ih//2 + self._s(10), iw, ih)
-        self.inp_user.draw(self.screen)
+        ttk.Button(self.footer, text="Leave Room", width=15, command=self.leave_room).pack(side="right", padx=10)
+        
+        self.update_players(self.master.players)
 
-        bw = self._s(240); bh = self._s(58)
-        self.btn_enter.rect = pygame.Rect(cx - bw//2, H//2 + self._s(60), bw, bh)
-        self.btn_enter.draw(self.screen)
+    def update_players(self, players):
+        self.player_listbox.delete(0, tk.END)
+        for p in players:
+            ready_status = "✅ [READY]" if p.get("ready", False) else "❌ [NOT READY]"
+            if p["username"] == self.master.username:
+                self.master.is_ready = p.get("ready", False)
+                self.ready_btn.config(text="UNREADY" if self.master.is_ready else "READY")
+            
+            host_tag = " 👑" if p.get("host") else ""
+            self.player_listbox.insert(tk.END, f" {p['username']}{host_tag} ".ljust(30) + f"{ready_status}")
+        
+        count = len(players)
+        self.count_label.config(text=f"{count} / 4 minimum players")
 
-        # Hint
-        conn_c = C["green"] if self.net.connected else C["red"]
-        conn_s = f"● Server {HOST}:{PORT}  connected" if self.net.connected else f"● Cannot connect to {HOST}:{PORT}"
-        draw_text(self.screen, conn_s, self.f_xs, conn_c, cx, H//2 + self._s(150), cx=True)
+    def toggle_ready(self):
+        self.master.net.send({"type": "ready", "status": not self.master.is_ready})
 
-    # ── Lobby Screen ───────────────────────────────────────────
-    def _draw_lobby(self):
-        W, H = self.W, self.H
-        self._draw_bg("day")
+    def start_game(self):
+        self.master.net.send({"type": "start"})
 
-        # Header
-        draw_panel(self.screen, 0, 0, W, self._s(88), C["panel"], C["border"])
-        draw_text(self.screen, "🐺  WEREWOLF  LOBBY", self.f_lg, C["accent"],
-                  W//2, self._s(28), cx=True)
-        draw_text(self.screen, f"  {self.username}  |  ping {self.ping_ms}ms",
-                  self.f_sm, C["dim"], W - self._s(340), self._s(32))
+    def leave_room(self):
+        self.master.net.send({"type": "leave"})
 
-        # Room input row
-        y0 = self._s(100)
-        rw = self._s(460); ih = self._s(58)
-        self.inp_room.rect = pygame.Rect(self._s(20), y0, rw, ih)
-        self.inp_room.draw(self.screen)
-        bw = self._s(160); bh = self._s(52)
-        ox = self._s(20) + rw + self._s(14)
-        self.btn_create.rect  = pygame.Rect(ox,            y0+3, bw, bh)
-        self.btn_join.rect    = pygame.Rect(ox+bw+self._s(14), y0+3, bw, bh)
-        self.btn_refresh.rect = pygame.Rect(ox+bw*2+self._s(28), y0+3, bw, bh)
-        for btn in (self.btn_create, self.btn_join, self.btn_refresh):
-            btn.draw(self.screen)
 
-        # ── Two columns ─────────────────────────────────────
-        col_y  = y0 + ih + self._s(20)
-        col_h  = H - col_y - self._s(100)
-        mid    = W // 2 - self._s(20)
+class GameFrame(tk.Frame):
+    def __init__(self, master):
+        super().__init__(master, bg=THEMES["lobby"]["bg"])
+        self.master = master
 
-        # LEFT: room list
-        draw_panel(self.screen, self._s(10), col_y, mid - self._s(10), col_h)
-        draw_text(self.screen, "Available Rooms", self.f_md, C["cyan"],
-                  self._s(24), col_y + self._s(12))
+        self.top_bar = tk.Frame(self, bg="#16213e", height=100)
+        self.top_bar.pack(fill="x")
+        self.top_bar.pack_propagate(False)
 
-        if not self.rooms_list:
-            draw_text(self.screen, "No rooms yet — create one!", self.f_sm, C["dim"],
-                      self._s(24), col_y + self._s(60))
-        for i, r in enumerate(self.rooms_list[:16]):
-            ry     = col_y + self._s(50) + i * self._s(52)
-            row_r  = pygame.Rect(self._s(20), ry, mid - self._s(30), self._s(46))
-            mx, my = pygame.mouse.get_pos()
-            hovered= row_r.collidepoint(mx, my)
-            bg = C["panel3"] if hovered else C["panel2"]
-            pygame.draw.rect(self.screen, bg, row_r, border_radius=8)
-            pygame.draw.rect(self.screen, C["border"], row_r, 1, border_radius=8)
-            waiting = "Waiting" in r["status"]
-            sc = C["green"] if waiting else C["dim"]
-            draw_text(self.screen, r["name"],   self.f_md, C["white"],  row_r.x+self._s(14), ry+self._s(12), max_w=mid//2)
-            draw_text(self.screen, f"{r['players']}/{r['max']}", self.f_sm, C["cyan"],   row_r.x+mid//2, ry+self._s(14))
-            draw_text(self.screen, r["status"], self.f_sm, sc,          row_r.right-self._s(170), ry+self._s(14))
-            if waiting and hovered:
-                draw_text(self.screen, "Click to join", self.f_xs, C["dim"], row_r.right-self._s(180), ry+self._s(14))
+        self.info_top = tk.Frame(self.top_bar, bg="#16213e")
+        self.info_top.pack(fill="x", padx=30, pady=(15, 0))
 
-        # RIGHT: current room
-        draw_panel(self.screen, mid + self._s(30), col_y, W - mid - self._s(40), col_h)
-        if self.room:
-            rx = mid + self._s(44)
-            draw_text(self.screen, f"📍  {self.room}", self.f_lg, C["cyan"], rx, col_y + self._s(14))
-            host_s = "  (You are host)" if self.is_host else ""
-            draw_text(self.screen, f"Players: {len(self.players)}{host_s}", self.f_sm, C["dim"], rx, col_y + self._s(60))
+        self.phase_label = tk.Label(self.info_top, text="NIGHT PHASE", font=self.master.font_header, bg="#16213e", fg="#e94560")
+        self.phase_label.pack(side="left")
 
-            for i, pd in enumerate(self.players[:10]):
-                py2 = col_y + self._s(100) + i * self._s(44)
-                c = C["gold"] if pd["username"] == self.username else C["white"]
-                host_t = "  👑" if pd.get("host") else ""
-                draw_text(self.screen, f"  ●  {pd['username']}{host_t}", self.f_md, c, rx, py2)
+        # Timer moved here to be beside Phase Title
+        self.timer_label = tk.Label(self.info_top, text="0s", font=self.master.font_timer, bg="#16213e", fg="#ffffff", padx=20)
+        self.timer_label.pack(side="left")
 
-            # Start hint
-            if self.is_host:
-                min_p = 2
-                if len(self.players) >= min_p:
-                    draw_text(self.screen, "✓ Ready to start!", self.f_sm, C["green"],
-                              rx, col_y + col_h - self._s(110))
-                else:
-                    draw_text(self.screen, f"Need {min_p - len(self.players)} more player(s)",
-                              self.f_sm, C["dim"], rx, col_y + col_h - self._s(110))
-            else:
-                draw_text(self.screen, "Waiting for host to start…", self.f_sm, C["dim"],
-                          rx, col_y + col_h - self._s(110))
+        self.role_label = tk.Label(self.info_top, text=f"ROLE: {self.master.role.upper()}", font=self.master.font_header, bg="#16213e", fg="#00d2ff")
+        self.role_label.pack(side="right")
+
+        self.timer_frame = tk.Frame(self.top_bar, bg="#16213e")
+        self.timer_frame.pack(fill="x", padx=30, pady=(5, 15))
+
+        self.timer_bar = ttk.Progressbar(self.timer_frame, orient="horizontal", mode="determinate", maximum=100, style="Timer.Horizontal.TProgressbar")
+        self.timer_bar.pack(fill="x", expand=True)
+
+        self.content = tk.Frame(self, bg=self.master["bg"])
+        self.content.pack(fill="both", expand=True)
+
+        self.chat_frame = tk.Frame(self.content, bg=self.master["bg"], padx=20, pady=20)
+        self.chat_frame.pack(side="left", fill="both", expand=True)
+
+        tk.Label(self.chat_frame, text="REALTIME CHAT", font=self.master.font_bold, bg=self.master["bg"], fg="#e1e1e1").pack(anchor="w", pady=(0, 10))
+
+        self.chat_area = scrolledtext.ScrolledText(self.chat_frame, bg="#16213e", fg="white", font=self.master.font_chat, 
+                                                   state="disabled", borderwidth=0, highlightthickness=1, highlightbackground="#333")
+        self.chat_area.pack(fill="both", expand=True)
+
+        self.input_frame = tk.Frame(self.chat_frame, bg=self.master["bg"])
+        self.input_frame.pack(fill="x", pady=(15, 0))
+
+        self.msg_entry = ttk.Entry(self.input_frame, font=self.master.font_main)
+        self.msg_entry.pack(side="left", fill="x", expand=True, padx=(0, 10))
+        self.msg_entry.bind("<Return>", lambda e: self.send_chat())
+
+        self.send_btn = ttk.Button(self.input_frame, text="Send", width=10, command=self.send_chat)
+        self.send_btn.pack(side="right")
+
+        self.right_frame = tk.Frame(self.content, bg=self.master["bg"], width=350, padx=20, pady=20)
+        self.right_frame.pack(side="right", fill="y")
+        self.right_frame.pack_propagate(False)
+
+        tk.Label(self.right_frame, text="PLAYER STATUS", font=self.master.font_bold, bg=self.master["bg"], fg="#e1e1e1").pack(pady=(0, 15))
+
+        self.players_container = tk.Frame(self.right_frame, bg=self.master["bg"])
+        self.players_container.pack(fill="both", expand=True)
+
+        self.update_players(self.master.players)
+        self.apply_theme(THEMES.get(self.master.phase, THEMES["lobby"]))
+
+    def apply_theme(self, theme):
+        self.configure(bg=theme["bg"])
+        self.content.configure(bg=theme["bg"])
+        self.chat_frame.configure(bg=theme["bg"])
+        self.input_frame.configure(bg=theme["bg"])
+        self.right_frame.configure(bg=theme["bg"])
+        self.players_container.configure(bg=theme["bg"])
+        for container in [self.chat_frame, self.right_frame]:
+            for widget in container.winfo_children():
+                if isinstance(widget, tk.Label):
+                    widget.configure(bg=theme["bg"], fg=theme["text"])
+        self.top_bar.configure(bg=theme["panel"])
+        self.info_top.configure(bg=theme["panel"])
+        self.timer_frame.configure(bg=theme["panel"])
+        for widget in self.info_top.winfo_children():
+            widget.configure(bg=theme["panel"])
+        self.timer_label.configure(bg=theme["panel"])
+        style = ttk.Style()
+        style.configure("Timer.Horizontal.TProgressbar", background=theme["accent"], troughcolor=theme["panel"])
+        if self.master.phase == "day":
+            self.phase_label.configure(fg="#243b55")
+            self.chat_area.configure(bg="#ffffff", fg="#333333", highlightbackground="#cccccc")
         else:
-            draw_text(self.screen, "Create or join a room", self.f_md, C["dim"],
-                      mid + self._s(44), col_y + self._s(60))
+            self.phase_label.configure(fg=theme["accent"])
+            self.chat_area.configure(bg="#16213e", fg="#ffffff", highlightbackground="#444444")
 
-        # Bottom buttons
-        self.btn_start.enabled = self.is_host and bool(self.room) and len(self.players) >= 2
-        bw2 = self._s(320); bh2 = self._s(68)
-        self.btn_start.rect = pygame.Rect(W//2 - bw2//2, H - bh2 - self._s(14), bw2, bh2)
-        if self.room:
-            self.btn_start.draw(self.screen)
-            lw = self._s(160); lh = self._s(54)
-            self.btn_leave.rect = pygame.Rect(W - lw - self._s(20), H - lh - self._s(20), lw, lh)
-            self.btn_leave.draw(self.screen)
+    def update_players(self, players):
+        for widget in self.players_container.winfo_children():
+            widget.destroy()
+        theme = THEMES.get(self.master.phase, THEMES["lobby"])
+        for p in players:
+            p_frame = tk.Frame(self.players_container, bg=theme["panel"], pady=10, padx=12, 
+                               highlightthickness=1, highlightbackground="#444")
+            p_frame.pack(fill="x", pady=4)
+            alive = p.get("alive", True)
+            connected = p.get("connected", True)
+            icon = "👤" if alive else "👻"
+            conn_status = "" if connected else " [OFFLINE]"
+            color = theme["text"] if (alive and connected) else "#888888"
+            name = p['username']
+            if p['username'] == self.master.username:
+                name += " (YOU)"
+                self.master.alive = alive
+            tk.Label(p_frame, text=f"{icon} {name}{conn_status}", bg=theme["panel"], fg=color, font=self.master.font_bold).pack(side="left")
+            if self.master.alive and alive and connected and p['username'] != self.master.username:
+                if self.master.phase == "voting":
+                    ttk.Button(p_frame, text="VOTE", width=6, command=lambda u=p['username']: self.vote(u)).pack(side="right")
+                elif self.master.phase == "night":
+                    if self.master.role == "Werewolf":
+                        ttk.Button(p_frame, text="KILL", width=6, command=lambda u=p['username']: self.kill(u)).pack(side="right")
+                    elif self.master.role == "Seer":
+                        ttk.Button(p_frame, text="CHECK", width=6, command=lambda u=p['username']: self.check(u)).pack(side="right")
 
-    def _draw_game(self):
-        W, H = self.W, self.H
-        night = self.phase == "night"
-        self._draw_bg("night" if night else "day")
+    def update_phase(self, packet):
+        phase_name = packet["phase"].upper() + " PHASE"
+        self.phase_label.config(text=phase_name)
+        if packet.get("msg"):
+            self.add_system_msg(packet["msg"])
+        self.update_players(self.master.players)
 
-        # Player panel width: dynamic based on player count
-        n_players = max(len(self.players), 1)
-        card_h    = self._s(80)
-        card_pad  = self._s(8)
-        needed_h  = n_players * (card_h + card_pad) + self._s(160)
-        pp_w      = max(self._s(380), min(self._s(560), int(W * 0.28)))
-        # Timer panel
-        tp_w      = self._s(220)
-        tp_h      = self._s(220)
-        # Chat panel
-        chat_w    = W - pp_w - tp_w - self._s(20)
-        chat_h_in = self._s(70)
-
-        # Phase colors
-        phase_colors = {"night":C["accent"],"day":C["gold"],"voting":C["red"],"ended":C["green"]}
-        ph_c = phase_colors.get(self.phase, C["white"])
-
-        bar_h = self._s(70)
-        draw_panel(self.screen, 0, 0, W, bar_h, C["panel"], ph_c)
-        # Phase
-        ph_label = {"night":"🌙 NIGHT","day":"☀️  DAY","voting":"🗳️  VOTING",
-                    "ended":"🏆 ENDED"}.get(self.phase, self.phase.upper())
-        draw_text(self.screen, ph_label, self.f_lg, ph_c, self._s(20), bar_h//2, cy=True)
-        draw_text(self.screen, f"Round {self.round_n}", self.f_md, C["dim"],
-                  self._s(340), bar_h//2, cy=True)
-        # Role badge
-        rc  = C["wolf"] if self.role=="Werewolf" else (C["seer"] if self.role=="Seer" else C["villager"])
-        ral = "ALIVE" if self.alive else "DEAD"
-        rac = C["green"] if self.alive else C["red"]
-        draw_text(self.screen, f"{self.role}", self.f_md, rc, W//2, bar_h//2 - self._s(10), cx=True, cy=True)
-        draw_text(self.screen, ral, self.f_xs, rac, W//2, bar_h//2 + self._s(14), cx=True, cy=True)
-        # Ping + room
-        draw_text(self.screen, f"📍 {self.room}  |  {self.username}  |  {self.ping_ms}ms",
-                  self.f_xs, C["dim"], W - self._s(450), bar_h//2, cy=True)
-
-        chat_x = 0
-        chat_y = bar_h + self._s(6)
-        chat_panel_h = H - bar_h - self._s(12)
-        draw_panel(self.screen, chat_x, chat_y, chat_w, chat_panel_h - chat_h_in - self._s(14))
-
-        # Hint bar
-        hints = {
-            "night":  ("🌙  NIGHT: Click a player to act | Wolves can chat only with wolves", C["accent"]),
-            "day":    ("☀️   DAY: Discuss freely! Chat below. Timer counts down to vote phase.", C["gold"]),
-            "voting": ("🗳️   VOTE: Click a player card button to vote them out!", C["red"]),
-            "ended":  ("🏆  Game over. Type anything or type /leave", C["green"]),
-        }
-        ht, hc = hints.get(self.phase, ("", C["dim"]))
-        draw_panel(self.screen, chat_x, chat_y, chat_w, self._s(32), C["panel2"], hc)
-        draw_text(self.screen, ht, self.f_xs, hc, chat_x + self._s(10), chat_y + self._s(7),
-                  max_w=chat_w - self._s(20))
-
-        # Messages
-        msg_y_start = chat_y + self._s(36)
-        msg_h       = self._s(22)
-        visible_n   = (chat_panel_h - chat_h_in - self._s(60) - self._s(36)) // msg_h
-        visible     = self.messages[-visible_n:]
-        for i, (msg, color, _) in enumerate(visible):
-            draw_text(self.screen, msg, self.f_xxs, color,
-                      chat_x + self._s(8), msg_y_start + i * msg_h,
-                      max_w=chat_w - self._s(16))
-
-        # Chat input
-        inp_y = H - chat_h_in - self._s(8)
-        inp_w = chat_w - self._s(140)
-        self.inp_chat.rect = pygame.Rect(chat_x + self._s(4), inp_y, inp_w, chat_h_in - self._s(8))
-        self.inp_chat.draw(self.screen)
-        sw = self._s(120)
-        self.btn_send.rect = pygame.Rect(chat_x + inp_w + self._s(8), inp_y, sw, chat_h_in - self._s(8))
-        self.btn_send.draw(self.screen)
-
-        tp_x = chat_w + self._s(8)
-        tp_y = bar_h + self._s(6)
-        draw_panel(self.screen, tp_x, tp_y, tp_w, tp_h + self._s(20), C["panel"])
-
-        timer_cx = tp_x + tp_w // 2
-        timer_cy = tp_y + (tp_h + self._s(20)) // 2
-        draw_timer(self.screen, timer_cx, timer_cy,
-                   self._s(75), self.timer_sec, self.timer_total,
-                   self.phase, self.f_timer, self.f_sm)
-
-        pp_x = chat_w + self._s(8)
-        pp_y = tp_y + tp_h + self._s(30)
-        pp_h = H - pp_y - self._s(4)
-        draw_panel(self.screen, pp_x, pp_y, pp_w, pp_h)
-
-        draw_text(self.screen, f"PLAYERS  ({len(self.players)})", self.f_md, C["cyan"],
-                  pp_x + pp_w//2, pp_y + self._s(12), cx=True)
-        pygame.draw.line(self.screen, C["border"],
-                         (pp_x + self._s(10), pp_y + self._s(38)),
-                         (pp_x + pp_w - self._s(10), pp_y + self._s(38)))
-
-        # Determine action label per role/phase
-        if self.phase == "voting" and self.alive and not self.voted:
-            action_label = "VOTE"
-            action_color = C["red"]
-        elif self.phase == "night" and self.alive:
-            if self.role == "Werewolf":
-                action_label = "KILL"
-                action_color = C["wolf"]
-            elif self.role == "Seer":
-                action_label = "CHECK"
-                action_color = C["seer"]
-            else:
-                action_label = None
-                action_color = C["dim"]
+    def update_timer(self, seconds):
+        sec_int = int(seconds)
+        self.timer_label.config(text=f"{sec_int}s")
+        if self.master.timer_total > 0:
+            progress = (sec_int / self.master.timer_total) * 100
+            self.timer_bar["value"] = progress
+        if sec_int <= 5:
+            self.timer_label.config(fg="#ff4d4d")
         else:
-            action_label = None
-            action_color = C["dim"]
+            self.timer_label.config(fg="#ffffff")
+        self.timer_bar.update_idletasks()
 
-        total_votes = sum(self.vote_tally.values()) if self.vote_tally else 1
+    def set_role(self, role):
+        self.master.role = role
+        self.role_label.config(text=f"ROLE: {role.upper()}")
 
-        cy2 = pp_y + self._s(46)
-        for pd in self.players:
-            uname = pd["username"]
-            if uname not in self.player_cards:
-                self.player_cards[uname] = PlayerCard(uname)
-            card = self.player_cards[uname]
-            card.alive   = pd.get("alive", True)
-            card.is_host = pd.get("host", False)
+    def add_chat(self, packet):
+        sender = packet.get("sender", "???")
+        msg = packet.get("msg", "")
+        self._display_msg(f"[{sender}]: {msg}")
 
-            cw2 = pp_w - self._s(12)
-            card.rect = pygame.Rect(pp_x + self._s(6), cy2, cw2, card_h)
+    def add_seer_result(self, packet):
+        target = packet.get("target")
+        role = packet.get("role", "Unknown")
+        msg = f"🔮 SEER VISION: {target} is a {role}!"
+        self._display_msg(msg)
 
-            # Determine action availability
-            alab = None
-            if action_label and card.alive and uname != self.username:
-                if self.phase == "night" and self.role == "Seer" and uname in self.seer_checked:
-                    alab = None  # already checked
-                elif self.phase == "night" and self.role == "Werewolf" and uname in self.wolves:
-                    alab = None  # can't kill teammate
-                else:
-                    alab = action_label
+    def add_system_msg(self, msg):
+        self._display_msg(f"✨ SYSTEM: {msg}")
 
-            vt = self.vote_tally.get(uname, 0)
-            card.draw(self.screen, self.f_sm, self.f_sm, self.f_xxs,
-                      alab, action_color,
-                      is_me=(uname == self.username),
-                      vote_tally=vt, total_votes=total_votes)
-            cy2 += card_h + card_pad
+    def _display_msg(self, text):
+        self.chat_area.config(state="normal")
+        self.chat_area.insert(tk.END, str(text) + "\n")
+        self.chat_area.config(state="disabled")
+        self.chat_area.see(tk.END)
 
-        if self.game_over:
-            self._draw_game_over_overlay()
+    def send_chat(self):
+        msg = self.msg_entry.get().strip()
+        if msg:
+            self.master.net.send({"type": "chat", "msg": msg})
+            self.msg_entry.delete(0, tk.END)
 
-    def _draw_game_over_overlay(self):
-        if not self.game_over:
-            return
-        W, H = self.W, self.H
-        # Dim background
-        dim_s = pygame.Surface((W, H), pygame.SRCALPHA)
-        dim_s.fill((0, 0, 0, 160))
-        self.screen.blit(dim_s, (0, 0))
+    def vote(self, target):
+        self.master.net.send({"type": "vote", "target": target})
 
-        winner = self.game_over.get("winner","")
-        roles  = self.game_over.get("roles", {})
-        wc     = C["wolf"] if winner == "Werewolf" else C["villager"]
+    def kill(self, target):
+        self.master.net.send({"type": "kill", "target": target})
 
-        pw = self._s(700); ph = min(self._s(200) + len(roles)*self._s(52), int(H*0.8))
-        px = W//2 - pw//2; py = H//2 - ph//2
-        draw_panel(self.screen, px, py, pw, ph, C["panel"], wc, radius=16)
+    def check(self, target):
+        self.master.net.send({"type": "check", "target": target})
 
-        draw_text(self.screen, f"🏆  {winner.upper()}S  WIN!", self.f_title, wc,
-                  W//2, py + self._s(40), cx=True)
-        draw_text(self.screen, "Final Roles:", self.f_md, C["dim"], W//2, py + self._s(100), cx=True)
-        for i, (uname, role) in enumerate(roles.items()):
-            rc = C["wolf"] if role == "Werewolf" else C["villager"]
-            draw_text(self.screen, f"{uname}  →  {role}", self.f_md, rc,
-                      W//2, py + self._s(140) + i * self._s(48), cx=True)
 
-        # Leave button
-        bw = self._s(260); bh = self._s(62)
-        leave_r = pygame.Rect(W//2 - bw//2, py + ph - bh - self._s(20), bw, bh)
-        mx, my = pygame.mouse.get_pos()
-        hov = leave_r.collidepoint(mx, my)
-        bg = C["accent_hi"] if hov else C["accent"]
-        pygame.draw.rect(self.screen, bg, leave_r, border_radius=8)
-        pygame.draw.rect(self.screen, C["white"], leave_r, 1, border_radius=8)
-        draw_text(self.screen, "Back to Lobby", self.f_md, C["white"],
-                  leave_r.centerx, leave_r.centery, cx=True, cy=True)
-        # Check click — handled via polling is tricky; check here
-        keys = pygame.mouse.get_pressed()
-        if hov and keys[0] and not hasattr(self, "_leave_clicked"):
-            self._leave_clicked = True
-            self.net.send({"type": "leave"})
-        if not keys[0]:
-            self._leave_clicked = False
+class GameOverFrame(tk.Frame):
+    def __init__(self, master):
+        super().__init__(master, bg=THEMES["ended"]["bg"])
+        self.master = master
+        results = self.master.game_results
+        winner = results.get("winner", "DRAW").upper()
+        roles = results.get("roles", {})
+        win_color = "#ffd700" if winner == "VILLAGER" else "#ff4d4d"
+        tk.Label(self, text="GAME OVER", font=self.master.font_title, bg=self.master["bg"], fg="#e1e1e1").pack(pady=(80, 20))
+        tk.Label(self, text=f"{winner}S WIN!", font=("Helvetica", 40, "bold"), bg=self.master["bg"], fg=win_color).pack(pady=20)
+        roles_frame = tk.Frame(self, bg="#16213e", padx=40, pady=40, highlightthickness=2, highlightbackground=win_color)
+        roles_frame.pack(pady=40, padx=100, fill="both", expand=True)
+        tk.Label(roles_frame, text="FINAL REVEAL:", font=self.master.font_header, bg="#16213e", fg="#e1e1e1").pack(pady=(0, 20))
+        scroll_frame = tk.Frame(roles_frame, bg="#16213e")
+        scroll_frame.pack(fill="both", expand=True)
+        canvas = tk.Canvas(scroll_frame, bg="#16213e", highlightthickness=0)
+        scrollbar = ttk.Scrollbar(scroll_frame, orient="vertical", command=canvas.yview)
+        scrollable_content = tk.Frame(canvas, bg="#16213e")
+        scrollable_content.bind("<Configure>", lambda e: canvas.configure(scrollregion=canvas.bbox("all")))
+        canvas.create_window((0, 0), window=scrollable_content, anchor="nw")
+        canvas.configure(yscrollcommand=scrollbar.set)
+        canvas.pack(side="left", fill="both", expand=True)
+        scrollbar.pack(side="right", fill="y")
+        for user, role in roles.items():
+            r_color = "#ff4d4d" if role == "Werewolf" else "#00d2ff"
+            f = tk.Frame(scrollable_content, bg="#16213e", pady=5)
+            f.pack(fill="x")
+            tk.Label(f, text=f"{user}", font=self.master.font_bold, bg="#16213e", fg="white", width=20, anchor="w").pack(side="left")
+            tk.Label(f, text=f"➔  {role}", font=self.master.font_bold, bg="#16213e", fg=r_color).pack(side="left")
+        ttk.Button(self, text="RETURN TO LOBBY", width=25, command=self.return_to_lobby).pack(pady=40)
 
-    def _draw_notif(self):
-        if self.notif_t > 0 and self.notif:
-            W, H = self.W, self.H
-            alpha = min(255, int(self.notif_t * 90))
-            nw = self._s(700); nh = self._s(52)
-            s = pygame.Surface((nw, nh), pygame.SRCALPHA)
-            s.fill((20, 10, 10, min(200, alpha)))
-            pygame.draw.rect(s, (*C["red"], min(255, alpha)), (0, 0, nw, nh), 2, border_radius=8)
-            txt = self.f_sm.render(self.notif[:80], True, C["white"])
-            s.blit(txt, (14, (nh - txt.get_height())//2))
-            self.screen.blit(s, (W//2 - nw//2, H - nh - self._s(80)))
+    def return_to_lobby(self):
+        self.master.phase = "lobby"
+        self.master.show_lobby()
 
 
 if __name__ == "__main__":
-    WerewolfGame().run()
+    app = WerewolfClient()
+    app.mainloop()

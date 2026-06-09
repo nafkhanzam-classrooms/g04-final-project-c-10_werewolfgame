@@ -7,9 +7,12 @@ class Player:
         self.addr = addr
         self.role = Role.VILLAGER
         self.alive = True
+        self.ready = False
         self.room = None
         self.ping = 0
         self.connected = True
+        self.mac = "" # Device identifier
 
     def __repr__(self):
-        return f"Player({self.username}, {self.role.value}, alive={self.alive})"
+        status = "ONLINE" if self.connected else "OFFLINE"
+        return f"Player({self.username}, {self.role.value}, alive={self.alive}, {status})"
