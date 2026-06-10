@@ -12,7 +12,7 @@ import sys
 # Configuration
 HOST = "127.0.0.1"
 PORT = 5000
-CLIENT_PORT = 5005  # Fixed local port to prevent multiple instances on same device
+CLIENT_PORT = 5005  
 
 # Color Themes
 THEMES = {
@@ -43,11 +43,9 @@ class NetClient:
             self.sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             self.sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
             
-            # Bind to a fixed local port to enforce single instance per device
             try:
                 self.sock.bind(("", CLIENT_PORT))
             except socket.error:
-                # Need to use a temporary root for messagebox if app isn't ready
                 temp_root = tk.Tk()
                 temp_root.withdraw()
                 messagebox.showerror("Error", f"Another instance of the game is already running on this device (Port {CLIENT_PORT} is busy).")
@@ -60,19 +58,16 @@ class NetClient:
             self.connected = True
             self.running = True
             threading.Thread(target=self._recv_loop, daemon=True).start()
-            
-            # Auto-identify to server immediately
+        
             self.send({"type": "identify"})
             
             return True
         except Exception as e:
-            # For general connection errors, we don't necessarily exit, but for bind errors we did above
             print(f"Connection error: {e}")
             return False
 
     def send(self, data):
         if self.connected:
-            # Auto-include MAC in every packet for reliability, though login is primary
             data["mac"] = self.mac
             try:
                 self.sock.sendall((json.dumps(data) + "\n").encode("utf-8"))
@@ -112,7 +107,7 @@ class NetClient:
 class WerewolfClient(tk.Tk):
     def __init__(self):
         super().__init__()
-        self.withdraw() # Hide until connection confirmed
+        self.withdraw() 
         
         self.title("Werewolf: Azrael of the Night")
         self.geometry("1000x750")
