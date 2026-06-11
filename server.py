@@ -7,22 +7,30 @@ from datetime import datetime
 
 from game.player import Player
 from game.room_manager import RoomManager
-from game.packet_handler import PacketHandler, Phase
+from game.packet_handler import PacketHandler
 from utils.serializer import decode
+from server.database import init_db, clear_session
 
 HOST = "0.0.0.0"
 PORT = 5000
 
+PING_WATCHDOG_INTERVAL = 5    # seconds between watchdog checks
+PING_TIMEOUT           = 35   # warn if no ping received for this many seconds
+
+
 class Server:
     def __init__(self):
-        self.active_conns = {}  # addr -> Player (current mapped player for this socket)
-        self.room_manager = RoomManager()
+        self.active_conns  = {}   # addr -> Player
+        self.room_manager  = RoomManager()
         self.packet_handler = PacketHandler(self)
         self._setup_logs()
+        init_db()
 
     def _setup_logs(self):
         os.makedirs("logs", exist_ok=True)
-        self.log_file = open(f"logs/server_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log", "a")
+        self.log_file = open(
+            f"logs/server_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log", "a"
+        )
 
     def log(self, msg):
         timestamp = datetime.now().strftime("%H:%M:%S")
@@ -35,16 +43,19 @@ class Server:
         server_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         server_sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         server_sock.bind((HOST, PORT))
-        server_sock.listen(10)
+        server_sock.listen(15)
         self.log(f"[SERVER] Werewolf Server running on {HOST}:{PORT}")
-        print(f"  TCP Server ready. Waiting for players...")
+        print("  TCP Server ready. Waiting for players...")
+
+        threading.Thread(target=self._watchdog_loop, daemon=True).start()
 
         while True:
             try:
                 conn, addr = server_sock.accept()
                 player = Player("", conn, addr)
+                player.last_ping = time.time()
                 self.active_conns[addr] = player
-                t = threading.Thread(target=self.handle_client, args=(player.addr,), daemon=True)
+                t = threading.Thread(target=self.handle_client, args=(addr,), daemon=True)
                 t.start()
                 self.log(f"[CONNECT] New connection from {addr}")
             except Exception as e:
@@ -54,10 +65,9 @@ class Server:
         buffer = ""
         try:
             while True:
-                # Always use the latest player object mapped to this address
                 player = self.active_conns.get(addr)
-                if not player: break
-
+                if not player:
+                    break
                 data = player.conn.recv(4096)
                 if not data:
                     break
@@ -69,44 +79,72 @@ class Server:
                         continue
                     try:
                         packet = decode(line)
-                        # Re-fetch player in case it was swapped by a concurrent on_login/on_identify
                         player = self.active_conns.get(addr)
-                        self.packet_handler.handle(player, packet)
+                        if player:
+                            self.packet_handler.handle(player, packet)
                     except json.JSONDecodeError:
-                        self.packet_handler.send(player, {"type": "error", "msg": "Invalid JSON"})
+                        player = self.active_conns.get(addr)
+                        if player:
+                            self.packet_handler.send(
+                                player, {"type": "error", "msg": "Malformed packet"}
+                            )
         except Exception:
             pass
         finally:
             self._on_disconnect(addr)
 
     def _on_disconnect(self, addr):
-        player = self.active_conns.get(addr)
-        if not player: return
+        player = self.active_conns.pop(addr, None)
+        if not player:
+            return
 
         player.connected = False
         rname = player.room
-        
-        # Determine if we should PURGE or PRESERVE
-        purge = True
+
         if rname:
             room = self.room_manager.get_room(rname)
-            # If match is active, DO NOT PURGE, just mark offline
             if room and room.started:
-                purge = False
+                # Keep player slot alive for reconnect; just mark offline
                 self.log(f"[OFFLINE] {player.username} disconnected from active match in {rname}")
-                self.packet_handler.broadcast(room, {"type": "system", "msg": f"{player.username} disconnected!"})
+                self.packet_handler.broadcast(
+                    room,
+                    {"type": "system", "msg": f"{player.username} disconnected!"},
+                    exclude=player.username
+                )
                 self.packet_handler._broadcast_players(room)
+                # Mark session as offline but keep room_code so they can reconnect
+                if player.username:
+                    clear_session(player.username)
+                try:
+                    player.conn.close()
+                except Exception:
+                    pass
+                return
 
-        if purge:
-            self.log(f"[DISCONNECT] {player.username if player.username else 'Guest'} disconnected (lobby/inactive)")
-            self.packet_handler.on_leave(player, {})
-            if addr in self.active_conns:
-                del self.active_conns[addr]
-                
+        # Lobby disconnect — full cleanup
+        self.log(
+            f"[DISCONNECT] {player.username if player.username else 'Guest'} disconnected"
+        )
+        self.packet_handler.on_leave(player, {})
         try:
             player.conn.close()
         except Exception:
             pass
+
+    def _watchdog_loop(self):
+        """Log a warning for any connected player who hasn't pinged in PING_TIMEOUT seconds."""
+        while True:
+            time.sleep(PING_WATCHDOG_INTERVAL)
+            now = time.time()
+            for player in list(self.active_conns.values()):
+                if not player.connected or not player.username:
+                    continue
+                if player.last_ping and (now - player.last_ping) > PING_TIMEOUT:
+                    self.log(
+                        f"[WARN] No ping from {player.username} for "
+                        f"{int(now - player.last_ping)}s"
+                    )
+
 
 if __name__ == "__main__":
     srv = Server()

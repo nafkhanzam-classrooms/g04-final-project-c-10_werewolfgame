@@ -1,38 +1,51 @@
-from game.game_state import Phase, Role
-from utils.serializer import encode
 import time
 import threading
 
-# Phase durations in seconds
+from game.game_state import Phase, Role
+from game.room_manager import MIN_PLAYERS
+from utils.serializer import encode
+from server.database import (
+    register_user, login_user, is_online,
+    set_connected, get_session, clear_session
+)
+
 PHASE_DURATION = {
     Phase.NIGHT:  45,
     Phase.DAY:    90,
     Phase.VOTING: 45,
 }
 
+HUNTER_SHOT_TIMEOUT = 20   # seconds
+
+
 class PacketHandler:
     def __init__(self, server):
-        self.server = server
-        self._phase_timers = {}   
-        self.match_sessions = {} # room_name -> { mac: Player }
+        self.server        = server
+        self._phase_timers = {}   # room_name -> threading.Event (cancel)
+
+    # ------------------------------------------------------------------ #
+    #  Dispatch                                                            #
+    # ------------------------------------------------------------------ #
 
     def handle(self, player, packet):
         ptype = packet.get("type")
         handlers = {
-            "identify":   self.on_identify,
-            "login":      self.on_login,
-            "create":     self.on_create,
-            "join":       self.on_join,
-            "leave":      self.on_leave,
-            "rooms":      self.on_rooms,
-            "start":      self.on_start,
-            "ready":      self.on_ready,
-            "chat":       self.on_chat,
-            "kill":       self.on_kill,
-            "vote":       self.on_vote,
-            "check":      self.on_check,
-            "ping":       self.on_ping,
-            "players":    self.on_players,
+            "register": self.on_register,
+            "login":    self.on_login,
+            "create":   self.on_create,
+            "join":     self.on_join,
+            "leave":    self.on_leave,
+            "rooms":    self.on_rooms,
+            "start":    self.on_start,
+            "ready":    self.on_ready,
+            "chat":     self.on_chat,
+            "kill":     self.on_kill,
+            "protect":  self.on_protect,
+            "check":    self.on_check,
+            "vote":     self.on_vote,
+            "hunter_shot": self.on_hunter_shot,
+            "ping":     self.on_ping,
+            "players":  self.on_players,
         }
         fn = handlers.get(ptype)
         if fn:
@@ -40,45 +53,9 @@ class PacketHandler:
         else:
             self.send(player, {"type": "error", "msg": f"Unknown packet type: {ptype}"})
 
-    def on_identify(self, player, packet):
-        mac = packet.get("mac", "")
-        if not mac: return
-        player.mac = mac
-
-        # GLOBAL SEARCH: Find if this MAC is in any active match session
-        for rname, sessions in self.match_sessions.items():
-            if mac in sessions:
-                old_p = sessions[mac]
-                room = self.server.room_manager.get_room(rname)
-                if not room: continue
-
-                # Restore connection
-                old_p.conn = player.conn
-                old_p.connected = True
-                
-                # Notify client and server
-                self.send(old_p, {"type": "login_ok", "username": old_p.username, "reconnect": True})
-                self.send(old_p, {"type": "phase_change", "phase": room.game.phase.value, 
-                                   "duration": room.game.phase_timer, "msg": "Session restored automatically!"})
-                
-                # Reveal private role and team info
-                self.send(old_p, {"type": "role_assigned", "role": old_p.role.value,
-                                   "team": "werewolf" if old_p.role == Role.WEREWOLF else "good"})
-                
-                if old_p.role == Role.WEREWOLF:
-                    wolves = room.game.get_werewolves()
-                    self.send(old_p, {"type": "wolf_team", "wolves": wolves})
-
-                self._broadcast_players(room)
-                self.broadcast(room, {"type": "system", "msg": f"{old_p.username} reconnected!"})
-                
-                # Replace mapping in server
-                self.server.active_conns[player.addr] = old_p
-                return
-        
-        # If not found, just let the client stay at main menu (already there)
-        pass
-
+    # ------------------------------------------------------------------ #
+    #  Send helpers                                                        #
+    # ------------------------------------------------------------------ #
 
     def send(self, player, data):
         try:
@@ -99,114 +76,116 @@ class PacketHandler:
                 self.send(p, data)
 
     def _broadcast_players(self, room):
-        """Push updated player list to everyone in room."""
         players_info = [
-            {"username": p.username if p.username else f"Guest_{p.addr[1]}", 
-             "alive": p.alive, 
-             "ready": p.ready,
-             "connected": p.connected,
-             "host": p.username == room.host}
+            {
+                "username":  p.username,
+                "alive":     p.alive,
+                "ready":     p.ready,
+                "connected": p.connected,
+                "host":      p.username == room.host,
+            }
             for p in room.game.players.values()
         ]
         self.broadcast(room, {"type": "players_list", "players": players_info,
                                "phase": room.game.phase.value})
 
-    def _start_phase_timer(self, room, phase, duration, callback):
-        rname = room.name
-        cancel_ev = threading.Event()
-        if rname in self._phase_timers:
-            self._phase_timers[rname].set()
-        self._phase_timers[rname] = cancel_ev
-        end_time = time.time() + duration
+    # ------------------------------------------------------------------ #
+    #  Auth handlers                                                       #
+    # ------------------------------------------------------------------ #
 
-        def countdown():
-            while not cancel_ev.is_set():
-                remaining = int(end_time - time.time())
-                if remaining <= 0:
-                    break
-                r = self.server.room_manager.get_room(rname)
-                if r and r.started and r.game.phase == phase:
-                    r.game.phase_timer = remaining
-                    self.broadcast(r, {"type": "timer", "seconds": remaining, "phase": phase.value, "duration": duration})
-                cancel_ev.wait(1.0)
-            if not cancel_ev.is_set():
-                r = self.server.room_manager.get_room(rname)
-                if r and r.started and r.game.phase == phase:
-                    callback(r)
-
-        t = threading.Thread(target=countdown, daemon=True)
-        t.start()
-
+    def on_register(self, player, packet):
+        username = packet.get("username", "").strip()
+        password = packet.get("password", "").strip()
+        if len(username) < 2:
+            self.send(player, {"type": "error", "msg": "Username must be at least 2 characters"})
+            return
+        if len(password) < 4:
+            self.send(player, {"type": "error", "msg": "Password must be at least 4 characters"})
+            return
+        ok, msg = register_user(username, password)
+        if not ok:
+            self.send(player, {"type": "error", "msg": msg})
+            return
+        self.send(player, {"type": "register_ok", "username": username})
 
     def on_login(self, player, packet):
         username = packet.get("username", "").strip()
-        mac = packet.get("mac", "")
-        player.mac = mac
+        password = packet.get("password", "").strip()
 
-        if not username or len(username) < 2:
-            self.send(player, {"type": "error", "msg": "Username must be at least 2 characters"})
-            return
-        
-        if not player.room:
-            self.send(player, {"type": "error", "msg": "You must join a room first"})
+        ok, msg = login_user(username, password)
+        if not ok:
+            self.send(player, {"type": "error", "msg": msg})
             return
 
-        room = self.server.room_manager.get_room(player.room)
-        if not room:
-            self.send(player, {"type": "error", "msg": "Room not found"})
+        # Check for a live reconnectable session BEFORE the duplicate-login guard.
+        # A player mid-game whose socket dropped is marked offline by _on_disconnect;
+        # we must let them back in even though their DB row may still say is_connected=1
+        # (race between clear_session and a fast reconnect).
+        session = get_session(username)
+        room_for_reconnect = None
+        if session and session["room_code"]:
+            room = self.server.room_manager.get_room(session["room_code"])
+            if room and room.started and username in room.game.players:
+                old_p = room.game.players[username]
+                if not old_p.connected:
+                    room_for_reconnect = room
+
+        # Duplicate login guard — only block if no valid reconnect slot exists
+        if room_for_reconnect is None and is_online(username):
+            self.send(player, {"type": "error", "msg": "Already logged in from another session"})
             return
 
-        # RECONNECT LOGIC: Check if this MAC is part of an active match session
-        rname = room.name
-        if rname in self.match_sessions and mac in self.match_sessions[rname]:
-            old_p = self.match_sessions[rname][mac]
-            if not old_p.connected:
-                # Found a disconnected match player! Restore them.
-                old_p.conn = player.conn
-                old_p.connected = True
-                
-                # Remove the temporary Guest player from the room
-                guest_key = f"Guest_{player.addr[1]}"
-                room.remove_player(guest_key)
-                
-                # We need to tell the server to replace the 'current' player object with the restored one
-                # for the current socket thread. 
-                self.send(old_p, {"type": "login_ok", "username": old_p.username, "reconnect": True})
-                self.send(old_p, {"type": "phase_change", "phase": room.game.phase.value, 
-                                   "duration": room.game.phase_timer, "msg": "Welcome back!"})
-                
-                # Reveal private role to reconnected player
-                self.send(old_p, {"type": "role_assigned", "role": old_p.role.value,
-                                   "team": "werewolf" if old_p.role == Role.WEREWOLF else "good"})
-                
-                self._broadcast_players(room)
-                self.broadcast(room, {"type": "system", "msg": f"{old_p.username} reconnected!"})
-                
-                # Notify server to use this old_p for future packets from this socket
-                self.server.active_conns[player.addr] = old_p
-                return
-
-        # Normal login check within room
-        for p in room.game.players.values():
-            if p != player and p.username == username:
-                self.send(player, {"type": "error", "msg": "Username already used in this room."})
-                return
-
-        old_key = player.username if player.username else f"Guest_{player.addr[1]}"
-        if old_key in room.game.players:
-            del room.game.players[old_key]
-            
         player.username = username
-        room.game.players[username] = player
-        
-        if room.host == "" or room.host == old_key:
-            room.host = username
-            
-        self._broadcast_players(room)
-        self.send(player, {"type": "login_ok", "username": username})
+
+        if room_for_reconnect is not None:
+            room  = room_for_reconnect
+            old_p = room.game.players[username]
+            old_p.conn      = player.conn
+            old_p.connected = True
+            old_p.last_ping = time.time()
+            self.server.active_conns[player.addr] = old_p
+            set_connected(username, room.name, True)
+
+            self.send(old_p, {"type": "login_ok", "username": username, "reconnect": True})
+            self._send_state_snapshot(old_p, room)
+            self._broadcast_players(room)
+            self.broadcast(room, {"type": "system", "msg": f"{username} reconnected!"}, exclude=username)
+            self.server.log(f"[RECONNECT] {username} room={room.name}")
+            return
+
+        # Fresh login — clear any stale session leftover from a previous crashed connection
+        clear_session(username)
+        set_connected(username, "", True)
+        self.send(player, {"type": "login_ok", "username": username, "reconnect": False})
+        self.server.log(f"[LOGIN] {username} OK")
+
+    def _send_state_snapshot(self, player, room):
+        players_info = [
+            {
+                "username":  p.username,
+                "alive":     p.alive,
+                "connected": p.connected,
+            }
+            for p in room.game.players.values()
+        ]
+        self.send(player, {
+            "type":          "state_snapshot",
+            "phase":         room.game.phase.value,
+            "time_remaining": room.game.phase_timer,
+            "role":          player.role.value,
+            "players":       players_info,
+        })
+
+    # ------------------------------------------------------------------ #
+    #  Room handlers                                                       #
+    # ------------------------------------------------------------------ #
 
     def on_create(self, player, packet):
-        if player.room: self.on_leave(player, {})
+        if not player.username:
+            self.send(player, {"type": "error", "msg": "Login required"})
+            return
+        if player.room:
+            self.on_leave(player, {})
         name = packet.get("room", "").strip().upper()
         room, msg = self.server.room_manager.create_room(name, player)
         if room is None:
@@ -215,16 +194,32 @@ class PacketHandler:
         self._send_room_joined(player, room, host=True)
 
     def on_join(self, player, packet):
-        if player.room: self.on_leave(player, {})
+        if not player.username:
+            self.send(player, {"type": "error", "msg": "Login required"})
+            return
         name = packet.get("room", "").strip().upper()
-        mac = packet.get("mac", "")
-        player.mac = mac
-        
-        ignore_started = False
-        if name in self.match_sessions and mac in self.match_sessions[name]:
-            ignore_started = True
+        room = self.server.room_manager.get_room(name)
 
-        room, msg = self.server.room_manager.join_room(name, player, ignore_started=ignore_started)
+        # Reconnect path: game is active and this username already has a slot
+        if room and room.started and player.username in room.game.players:
+            old_p = room.game.players[player.username]
+            old_p.conn      = player.conn
+            old_p.connected = True
+            old_p.last_ping = time.time()
+            self.server.active_conns[player.addr] = old_p
+            set_connected(old_p.username, room.name, True)
+
+            self.send(old_p, {"type": "login_ok", "username": old_p.username, "reconnect": True})
+            self._send_state_snapshot(old_p, room)
+            self._broadcast_players(room)
+            self.broadcast(room, {"type": "system", "msg": f"{old_p.username} reconnected!"},
+                           exclude=old_p.username)
+            self.server.log(f"[RECONNECT] {old_p.username} via join room={room.name}")
+            return
+
+        if player.room:
+            self.on_leave(player, {})
+        room, msg = self.server.room_manager.join_room(name, player)
         if room is None:
             self.send(player, {"type": "error", "msg": msg})
             return
@@ -233,58 +228,68 @@ class PacketHandler:
 
     def _send_room_joined(self, player, room, host):
         players_info = [
-            {"username": p.username if p.username else f"Guest_{p.addr[1]}", 
-             "alive": p.alive, "ready": p.ready, "connected": p.connected, "host": p.username == room.host}
+            {
+                "username":  p.username,
+                "alive":     p.alive,
+                "ready":     p.ready,
+                "connected": p.connected,
+                "host":      p.username == room.host,
+            }
             for p in room.game.players.values()
         ]
-        self.send(player, {"type": "room_joined", "room": room.name, "host": host,
-                            "players": players_info})
+        self.send(player, {"type": "room_joined", "room": room.name,
+                            "host": host, "players": players_info})
 
     def on_leave(self, player, packet):
-        if not player.room: return
-        room = self.server.room_manager.get_room(player.room)
+        if not player.room:
+            return
         rname = player.room
-        
-        # If match is active, remove from session memory
-        if rname in self.match_sessions and player.mac in self.match_sessions[rname]:
-            del self.match_sessions[rname][player.mac]
-
+        room  = self.server.room_manager.get_room(rname)
         player.ready = False
-        player.username = ""
         self.server.room_manager.leave_room(player)
         if room:
             self._broadcast_players(room)
+        clear_session(player.username)
         self.send(player, {"type": "left_room", "room": rname})
 
     def on_rooms(self, player, packet):
-        rooms = self.server.room_manager.list_rooms()
-        self.send(player, {"type": "rooms_list", "rooms": rooms})
+        self.send(player, {"type": "rooms_list", "rooms": self.server.room_manager.list_rooms()})
 
     def on_ready(self, player, packet):
-        if not player.room: return
+        if not player.room:
+            return
         room = self.server.room_manager.get_room(player.room)
-        if not room: return
-        player.ready = packet.get("status", True)
+        if not room:
+            return
+        with room.lock:
+            player.ready = packet.get("status", True)
         self._broadcast_players(room)
 
     def on_start(self, player, packet):
-        if not player.room: return
+        if not player.room:
+            return
         room = self.server.room_manager.get_room(player.room)
+        if not room:
+            return
         if room.host != player.username:
             self.send(player, {"type": "error", "msg": "Only host can start"})
             return
         if not room.can_start():
-            self.send(player, {"type": "error", "msg": "Need at least 4 players and all must be READY."})
+            self.send(player, {"type": "error",
+                                "msg": f"Need at least {MIN_PLAYERS} players and all must be READY."})
             return
-        
-        room.started = True
-        room.game.assign_roles()
-        room.game.phase = Phase.NIGHT
-        room.game.round = 1
 
-        # Initialize match session memory for reconnection
-        self.match_sessions[room.name] = {p.mac: p for p in room.game.players.values() if p.mac}
+        with room.lock:
+            room.started = True
+            room.game.assign_roles()
+            room.game.phase = Phase.NIGHT
+            room.game.round = 1
 
+        # Persist sessions for reconnect
+        for p in room.game.players.values():
+            set_connected(p.username, room.name, True)
+
+        # Deliver private role info
         for p in room.game.players.values():
             self.send(p, {"type": "role_assigned", "role": p.role.value,
                            "team": "werewolf" if p.role == Role.WEREWOLF else "good"})
@@ -295,18 +300,25 @@ class PacketHandler:
 
         duration = PHASE_DURATION[Phase.NIGHT]
         self.broadcast(room, {"type": "phase_change", "phase": "night", "round": 1,
-                               "duration": duration, "msg": "Night falls. Werewolves, choose your victim."})
+                               "duration": duration,
+                               "msg": "Night falls. Werewolves, choose your victim."})
         self._broadcast_players(room)
         self._start_phase_timer(room, Phase.NIGHT, duration, self._night_timeout)
 
+    # ------------------------------------------------------------------ #
+    #  Chat                                                                #
+    # ------------------------------------------------------------------ #
+
     def on_chat(self, player, packet):
-        if not player.room: return
+        if not player.room:
+            return
         room = self.server.room_manager.get_room(player.room)
-        msg = packet.get("msg", "").strip()
-        if not msg: return
+        msg  = packet.get("msg", "").strip()
+        if not msg:
+            return
         if not player.alive:
             for p in room.game.players.values():
-                if not p.alive:
+                if not p.alive and p.connected:
                     self.send(p, {"type": "chat", "sender": player.username, "msg": msg, "dead": True})
             return
         if room.game.phase == Phase.NIGHT:
@@ -318,120 +330,321 @@ class PacketHandler:
         else:
             self.broadcast(room, {"type": "chat", "sender": player.username, "msg": msg})
 
+    # ------------------------------------------------------------------ #
+    #  Night actions                                                       #
+    # ------------------------------------------------------------------ #
+
     def on_kill(self, player, packet):
-        if not player.room or player.role != Role.WEREWOLF: return
+        if not player.room or player.role != Role.WEREWOLF:
+            return
         room = self.server.room_manager.get_room(player.room)
-        if room.game.phase != Phase.NIGHT: return
+        if room.game.phase != Phase.NIGHT:
+            return
         target = packet.get("target", "")
-        if target in room.game.players and room.game.players[target].alive:
-            room.game.night_kills[player.username] = target
-            self.broadcast_wolves(room, {"type": "system", "msg": f"{player.username} targeted {target}"})
+        with room.lock:
+            if target in room.game.players and room.game.players[target].alive:
+                room.game.night_kills[player.username] = target
+        self.broadcast_wolves(room, {"type": "system",
+                                      "msg": f"{player.username} targeted {target}"})
+        self._check_night_early_end(room)
+
+    def on_protect(self, player, packet):
+        if not player.room or player.role != Role.DOCTOR:
+            return
+        room = self.server.room_manager.get_room(player.room)
+        if room.game.phase != Phase.NIGHT:
+            return
+        target = packet.get("target", "")
+        with room.lock:
+            if target in room.game.players and room.game.players[target].alive:
+                room.game.night_protect = target
+        self.send(player, {"type": "system", "msg": f"You chose to protect {target}."})
+        self._check_night_early_end(room)
 
     def on_check(self, player, packet):
-        if not player.room or player.role != Role.SEER: return
+        if not player.room or player.role != Role.SEER:
+            return
         room = self.server.room_manager.get_room(player.room)
-        if room.game.phase != Phase.NIGHT: return
+        if room.game.phase != Phase.NIGHT:
+            return
+        with room.lock:
+            if player.username in room.game.seer_check:
+                self.send(player, {"type": "error", "msg": "You have already used your vision this night."})
+                return
         target = packet.get("target", "")
-        if target in room.game.players:
+        with room.lock:
+            if target not in room.game.players:
+                return
             target_p = room.game.players[target]
-            is_wolf = target_p.role == Role.WEREWOLF
-            self.send(player, {"type": "seer_result", "target": target, "is_werewolf": is_wolf,
-                                "role": target_p.role.value,
-                                "msg": f"{target} is a {target_p.role.value}."})
+            room.game.seer_check[player.username] = target
+        is_wolf = target_p.role == Role.WEREWOLF
+        self.send(player, {"type": "seer_result", "target": target,
+                            "is_werewolf": is_wolf, "role": target_p.role.value,
+                            "msg": f"{target} is a {target_p.role.value}."})
+        self._check_night_early_end(room)
+
+    def _check_night_early_end(self, room):
+        """End night phase early when all living night-action roles have submitted."""
+        with room.lock:
+            alive = room.game.get_alive_players()
+            wolves      = [u for u in alive if room.game.players[u].role == Role.WEREWOLF]
+            seers       = [u for u in alive if room.game.players[u].role == Role.SEER]
+            doctors     = [u for u in alive if room.game.players[u].role == Role.DOCTOR]
+            all_wolves_voted  = all(u in room.game.night_kills for u in wolves)
+            all_seers_checked = all(u in room.game.seer_check  for u in seers)
+            all_doctors_done  = (not doctors) or (room.game.night_protect is not None)
+            ready = all_wolves_voted and all_seers_checked and all_doctors_done
+        if ready and room.game.phase == Phase.NIGHT:
+            self._cancel_timer(room)
+            self._night_timeout(room)
+
+    # ------------------------------------------------------------------ #
+    #  Voting                                                              #
+    # ------------------------------------------------------------------ #
 
     def on_vote(self, player, packet):
-        if not player.room or not player.alive: return
+        if not player.room or not player.alive:
+            return
         room = self.server.room_manager.get_room(player.room)
-        if room.game.phase != Phase.VOTING: return
+        if room.game.phase != Phase.VOTING:
+            return
         target = packet.get("target", "")
-        if target in room.game.players and room.game.players[target].alive:
+        with room.lock:
+            if target not in room.game.players or not room.game.players[target].alive:
+                return
             room.game.votes[player.username] = target
-            self.broadcast(room, {"type": "system", "msg": f"{player.username} has voted."})
-            alive = room.game.get_alive_players()
-            if len(room.game.votes) >= len(alive):
-                self._resolve_vote(room)
+            vote_counts = {}
+            for t in room.game.votes.values():
+                vote_counts[t] = vote_counts.get(t, 0) + 1
+            alive_count = len(room.game.get_alive_players())
+            votes_in    = len(room.game.votes)
 
-    def on_ping(self, player, packet):
-        self.send(player, {"type": "pong", "t": packet.get("t", 0)})
+        self.broadcast(room, {"type": "system", "msg": f"{player.username} has voted."})
+        self.broadcast(room, {"type": "vote_update", "vote_counts": vote_counts,
+                               "votes_in": votes_in, "total": alive_count})
 
-    def on_players(self, player, packet):
-        if not player.room: return
+    # ------------------------------------------------------------------ #
+    #  Hunter                                                              #
+    # ------------------------------------------------------------------ #
+
+    def on_hunter_shot(self, player, packet):
+        if not player.room:
+            return
         room = self.server.room_manager.get_room(player.room)
+        with room.lock:
+            if room.game.hunter_pending != player.username:
+                return
+            target = packet.get("target", "")
+            if target not in room.game.players or not room.game.players[target].alive:
+                self.send(player, {"type": "error", "msg": "Invalid target"})
+                return
+            room.game.players[target].alive = False
+            room.game.eliminated.append(target)
+            room.game.hunter_pending = None
+
+        self.broadcast(room, {"type": "eliminated", "player": target,
+                               "role": room.game.players[target].role.value,
+                               "msg": f"Hunter {player.username} shot {target}!"})
         self._broadcast_players(room)
-
-
-    def _night_timeout(self, room):
-        if room.game.phase != Phase.NIGHT: return
-        kills = list(room.game.night_kills.values())
-        victim = None
-        if kills:
-            from collections import Counter
-            victim = Counter(kills).most_common(1)[0][0]
-            room.game.players[victim].alive = False
-            room.game.eliminated.append(victim)
-        
         winner = room.game.check_win()
         if winner:
             self._announce_winner(room, winner)
         else:
+            self._start_next_night(room)
+
+    # ------------------------------------------------------------------ #
+    #  Ping / latency                                                      #
+    # ------------------------------------------------------------------ #
+
+    def on_ping(self, player, packet):
+        player.last_ping = time.time()
+        self.send(player, {"type": "pong", "t": packet.get("t", 0),
+                            "server_time": time.time()})
+
+    def on_players(self, player, packet):
+        if not player.room:
+            return
+        room = self.server.room_manager.get_room(player.room)
+        if room:
+            self._broadcast_players(room)
+
+    # ------------------------------------------------------------------ #
+    #  Phase timer helpers                                                 #
+    # ------------------------------------------------------------------ #
+
+    def _start_phase_timer(self, room, phase, duration, callback):
+        rname      = room.name
+        cancel_ev  = threading.Event()
+        self._cancel_timer(room)
+        self._phase_timers[rname] = cancel_ev
+        end_time   = time.time() + duration
+
+        def countdown():
+            while not cancel_ev.is_set():
+                remaining = int(end_time - time.time())
+                if remaining <= 0:
+                    break
+                r = self.server.room_manager.get_room(rname)
+                if r and r.started and r.game.phase == phase:
+                    r.game.phase_timer = remaining
+                    self.broadcast(r, {"type": "timer", "seconds": remaining,
+                                       "phase": phase.value, "duration": duration})
+                cancel_ev.wait(1.0)
+            if not cancel_ev.is_set():
+                r = self.server.room_manager.get_room(rname)
+                if r and r.started and r.game.phase == phase:
+                    callback(r)
+
+        threading.Thread(target=countdown, daemon=True).start()
+
+    def _cancel_timer(self, room):
+        ev = self._phase_timers.get(room.name)
+        if ev:
+            ev.set()
+
+    # ------------------------------------------------------------------ #
+    #  Night resolution                                                    #
+    # ------------------------------------------------------------------ #
+
+    def _night_timeout(self, room):
+        if room.game.phase != Phase.NIGHT:
+            return
+        with room.lock:
+            kills   = list(room.game.night_kills.values())
+            protect = room.game.night_protect
+            victim  = None
+            if kills:
+                from collections import Counter
+                chosen = Counter(kills).most_common(1)[0][0]
+                if chosen != protect:
+                    victim = chosen
+                    room.game.players[victim].alive = False
+                    room.game.eliminated.append(victim)
+
+        winner = room.game.check_win()
+        if winner:
+            self._announce_winner(room, winner)
+            return
+
+        # Check if victim was Hunter
+        if victim and room.game.players[victim].role == Role.HUNTER:
+            self._trigger_hunter(room, victim)
+        else:
             self._advance_to_day(room, victim)
 
+    def _trigger_hunter(self, room, hunter_username):
+        with room.lock:
+            room.game.hunter_pending = hunter_username
+        self.broadcast(room, {"type": "eliminated", "player": hunter_username,
+                               "role": Role.HUNTER.value,
+                               "msg": f"{hunter_username} (Hunter) was eliminated — they may fire a shot!"})
+        self._broadcast_players(room)
+        hunter_p = room.game.players.get(hunter_username)
+        if hunter_p and hunter_p.connected:
+            self.send(hunter_p, {"type": "hunter_prompt",
+                                  "msg": "You were eliminated! Choose someone to shoot (20s)."})
+
+        def hunter_timeout():
+            time.sleep(HUNTER_SHOT_TIMEOUT)
+            with room.lock:
+                still_pending = room.game.hunter_pending == hunter_username
+                room.game.hunter_pending = None
+            if still_pending:
+                self.broadcast(room, {"type": "system",
+                                       "msg": f"{hunter_username} did not shoot in time."})
+                winner = room.game.check_win()
+                if winner:
+                    self._announce_winner(room, winner)
+                else:
+                    phase = room.game.phase
+                    if phase == Phase.NIGHT:
+                        # came from night
+                        self._advance_to_day(room, hunter_username)
+                    else:
+                        self._start_next_night(room)
+
+        threading.Thread(target=hunter_timeout, daemon=True).start()
+
     def _advance_to_day(self, room, victim):
-        room.game.phase = Phase.DAY
+        with room.lock:
+            room.game.phase = Phase.DAY
         duration = PHASE_DURATION[Phase.DAY]
         msg = f"{victim} was killed last night." if victim else "No one was killed last night."
-        self.broadcast(room, {"type": "phase_change", "phase": "day", "duration": duration, "msg": msg})
+        self.broadcast(room, {"type": "phase_change", "phase": "day",
+                               "duration": duration, "msg": msg})
         self._broadcast_players(room)
         self._start_phase_timer(room, Phase.DAY, duration, self._advance_to_voting)
 
     def _advance_to_voting(self, room):
-        room.game.phase = Phase.VOTING
-        room.game.votes = {}
+        with room.lock:
+            room.game.phase = Phase.VOTING
+            room.game.votes = {}
         duration = PHASE_DURATION[Phase.VOTING]
-        self.broadcast(room, {"type": "phase_change", "phase": "voting", "duration": duration, "msg": "Time to vote!"})
+        self.broadcast(room, {"type": "phase_change", "phase": "voting",
+                               "duration": duration, "msg": "Time to vote!"})
         self._broadcast_players(room)
         self._start_phase_timer(room, Phase.VOTING, duration, self._resolve_vote)
 
     def _resolve_vote(self, room):
-        if room.game.phase != Phase.VOTING: return
-        rname = room.name
-        if rname in self._phase_timers: self._phase_timers[rname].set()
+        if room.game.phase != Phase.VOTING:
+            return
+        self._cancel_timer(room)
+        with room.lock:
+            eliminated = room.game.tally_votes()
+            if eliminated:
+                room.game.players[eliminated].alive = False
+                room.game.eliminated.append(eliminated)
 
-        eliminated = room.game.tally_votes()
         if eliminated:
-            room.game.players[eliminated].alive = False
-            room.game.eliminated.append(eliminated)
-            self.broadcast(room, {"type": "eliminated", "player": eliminated, "role": room.game.players[eliminated].role.value,
-                                   "msg": f"{eliminated} was voted out. They were a {room.game.players[eliminated].role.value}."})
+            elim_role = room.game.players[eliminated].role.value
+            self.broadcast(room, {"type": "eliminated", "player": eliminated,
+                                   "role": elim_role,
+                                   "msg": f"{eliminated} was voted out. They were a {elim_role}."})
         else:
-            self.broadcast(room, {"type": "system", "msg": "No majority. Nobody eliminated."})
+            self.broadcast(room, {"type": "system", "msg": "It's a tie! Nobody eliminated."})
 
+        self._broadcast_players(room)
         winner = room.game.check_win()
         if winner:
             self._announce_winner(room, winner)
-        else:
+            return
+
+        # Hunter triggered by vote?
+        if eliminated and room.game.players[eliminated].role == Role.HUNTER:
+            self._trigger_hunter(room, eliminated)
+            return
+
+        self._start_next_night(room)
+
+    def _start_next_night(self, room):
+        with room.lock:
             room.game.round += 1
             room.game.reset_round()
             room.game.phase = Phase.NIGHT
-            duration = PHASE_DURATION[Phase.NIGHT]
-            self.broadcast(room, {"type": "phase_change", "phase": "night", "round": room.game.round, "duration": duration, "msg": "Night falls..."})
-            self._broadcast_players(room)
-            self._start_phase_timer(room, Phase.NIGHT, duration, self._night_timeout)
+        duration = PHASE_DURATION[Phase.NIGHT]
+        self.broadcast(room, {"type": "phase_change", "phase": "night",
+                               "round": room.game.round, "duration": duration,
+                               "msg": "Night falls..."})
+        self._broadcast_players(room)
+        self._start_phase_timer(room, Phase.NIGHT, duration, self._night_timeout)
+
+    # ------------------------------------------------------------------ #
+    #  Game over                                                           #
+    # ------------------------------------------------------------------ #
 
     def _announce_winner(self, room, winner):
         roles = {p.username: p.role.value for p in room.game.players.values()}
         self.broadcast(room, {"type": "game_over", "winner": winner, "roles": roles})
-        room.started = False
-        room.game.phase = Phase.ENDED
-        
-        # MATCH OVER: Clear reconnection memory for this room
-        if room.name in self.match_sessions:
-            del self.match_sessions[room.name]
+        self.server.log(f"[GAME_OVER] room={room.name} winner={winner}")
 
-        # Reset all players
+        with room.lock:
+            room.started        = False
+            room.game.phase     = Phase.ENDED
+            room.game.hunter_pending = None
+        self._cancel_timer(room)
+
         for p in room.game.players.values():
+            clear_session(p.username)
             p.ready = False
             p.alive = True
-            p.role = Role.VILLAGER
-            
-        if room.name in self._phase_timers: self._phase_timers[room.name].set()
+            p.role  = Role.VILLAGER
