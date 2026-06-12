@@ -5,20 +5,51 @@ import threading
 import json
 import queue
 import time
+import platform
 
 HOST = "143.198.217.44"
 PORT = 5000
-MAX_LINE_BYTES = 64 * 1024   # cap a single packet line at 64KB
+MAX_LINE_BYTES = 64 * 1024
+
+# ── Role metadata ──────────────────────────────────────────────────────────────
+# ASCII-safe role labels that render on any OS/font
+ROLE_ICONS = {
+    "Werewolf": "[W]",
+    "Seer":     "[S]",
+    "Doctor":   "[D]",
+    "Hunter":   "[H]",
+    "Villager": "[V]",
+}
+ROLE_COLORS = {
+    "Werewolf": "#ff4d4d",
+    "Seer":     "#c084fc",
+    "Doctor":   "#4ade80",
+    "Hunter":   "#fb923c",
+    "Villager": "#93c5fd",
+}
 
 THEMES = {
     "lobby":  {"bg": "#1a1a2e", "panel": "#16213e", "accent": "#00d2ff", "text": "#e1e1e1"},
     "night":  {"bg": "#0f0c29", "panel": "#302b63", "accent": "#e94560", "text": "#ffffff"},
-    "day":    {"bg": "#ece9e6", "panel": "#ffffff", "accent": "#243b55", "text": "#333333"},
-    "voting": {"bg": "#434343", "panel": "#000000", "accent": "#ff4d4d", "text": "#ffffff"},
-    "ended":  {"bg": "#1a1a2e", "panel": "#16213e", "accent": "#ffd700", "text": "#ffffff"},
+    "day":    {"bg": "#ece9e6", "panel": "#ffffff",  "accent": "#243b55", "text": "#333333"},
+    "voting": {"bg": "#434343", "panel": "#000000",  "accent": "#ff4d4d", "text": "#ffffff"},
+    "ended":  {"bg": "#1a1a2e", "panel": "#16213e",  "accent": "#ffd700", "text": "#ffffff"},
 }
 
+def _play_sound(name):
+    try:
+        if platform.system() == "Windows":
+            import winsound
+            freqs = {"phase": 880, "vote": 660, "chat": 440, "alert": 1100, "win": 1320}
+            f = freqs.get(name, 440)
+            threading.Thread(target=lambda: winsound.Beep(f, 180), daemon=True).start()
+        else:
+            print("\a", end="", flush=True)
+    except Exception:
+        pass
 
+
+# ══════════════════════════════════════════════════════════════════════════════
 class NetClient:
     def __init__(self, host, port, packet_queue):
         self.host         = host
@@ -59,24 +90,18 @@ class NetClient:
                     self.connected = False
                     break
                 buffer += data.decode("utf-8", errors="ignore")
-
                 while "\n" in buffer:
                     line, buffer = buffer.split("\n", 1)
                     line = line.strip()
                     if not line:
                         continue
                     if len(line) > MAX_LINE_BYTES:
-                        print(f"[CLIENT] Oversized line ({len(line)}B), dropped")
                         continue
                     try:
                         self.packet_queue.put(json.loads(line))
                     except Exception:
-                        # Malformed JSON from server — just skip it.
                         pass
-
-                # Drop an oversized incomplete buffer.
                 if len(buffer) > MAX_LINE_BYTES:
-                    print(f"[CLIENT] Oversized buffer ({len(buffer)}B), dropped")
                     buffer = ""
             except Exception:
                 self.connected = False
@@ -93,20 +118,19 @@ class NetClient:
                 pass
 
 
+# ══════════════════════════════════════════════════════════════════════════════
 class WerewolfClient(tk.Tk):
     def __init__(self):
         super().__init__()
         self.withdraw()
         self.title("Werewolf: Azrael of the Night")
         self.geometry("1000x750")
-        self.minsize(800, 600)
-        self.resizable(True, True)
+        self.resizable(False, False)
         self.configure(bg="#1a1a2e")
 
         self.packet_queue = queue.Queue()
         self.net          = NetClient(HOST, PORT, self.packet_queue)
 
-        # State
         self.username     = ""
         self.room_code    = ""
         self.is_host      = False
@@ -116,10 +140,10 @@ class WerewolfClient(tk.Tk):
         self.alive        = True
         self.timer        = 0
         self.timer_total  = 60
-        self.is_ready       = False
-        self.game_results   = None
-        self.ping_ms        = "--"
-        self.seer_used      = False   # reset each night phase
+        self.is_ready     = False
+        self.game_results = None
+        self.ping_ms      = "--"
+        self.seer_used    = False
 
         self.current_frame = None
         self._setup_styles()
@@ -131,15 +155,8 @@ class WerewolfClient(tk.Tk):
 
         self.deiconify()
         self.show_auth()
-
-        # Ping heartbeat thread
         threading.Thread(target=self._ping_loop, daemon=True).start()
-
         self.after(100, self._process_packets)
-
-    # ------------------------------------------------------------------ #
-    #  Ping                                                                #
-    # ------------------------------------------------------------------ #
 
     def _ping_loop(self):
         while True:
@@ -148,26 +165,22 @@ class WerewolfClient(tk.Tk):
                 self._ping_sent_at = time.time()
                 self.net.send({"type": "ping", "t": self._ping_sent_at})
 
-    # ------------------------------------------------------------------ #
-    #  Styles                                                              #
-    # ------------------------------------------------------------------ #
-
     def _setup_styles(self):
         style = ttk.Style()
         style.theme_use("clam")
-
-        self.font_title  = ("Helvetica", 32, "bold")
-        self.font_header = ("Helvetica", 20, "bold")
-        self.font_main   = ("Helvetica", 12)
-        self.font_bold   = ("Helvetica", 12, "bold")
+        self.font_title  = ("Courier", 28, "bold")
+        self.font_header = ("Courier", 18, "bold")
+        self.font_main   = ("Courier", 11)
+        self.font_bold   = ("Courier", 11, "bold")
         self.font_chat   = ("Courier", 11)
-        self.font_timer  = ("Helvetica", 18, "bold")
-
+        self.font_timer  = ("Courier", 16, "bold")
+        self.font_small  = ("Courier", 9)
         style.configure("TFrame",  background="#1a1a2e")
-        style.configure("TLabel",  background="#1a1a2e", foreground="#e1e1e1", font=self.font_main)
-        style.configure("TButton", font=self.font_bold, padding=10)
+        style.configure("TLabel",  background="#1a1a2e", foreground="#e1e1e1",
+                        font=self.font_main)
+        style.configure("TButton", font=self.font_bold, padding=8)
         style.configure("Timer.Horizontal.TProgressbar",
-                        thickness=15, troughcolor="#16213e", background="#00d2ff",
+                        thickness=12, troughcolor="#16213e", background="#00d2ff",
                         bordercolor="#16213e", lightcolor="#00d2ff", darkcolor="#00d2ff")
 
     def update_theme(self, phase):
@@ -183,10 +196,6 @@ class WerewolfClient(tk.Tk):
         self.current_frame.pack(fill="both", expand=True)
         self.update_theme(self.phase)
 
-    # ------------------------------------------------------------------ #
-    #  Packet processing                                                  #
-    # ------------------------------------------------------------------ #
-
     def _process_packets(self):
         while not self.packet_queue.empty():
             self._handle_packet(self.packet_queue.get())
@@ -196,7 +205,8 @@ class WerewolfClient(tk.Tk):
         ptype = packet.get("type")
 
         if ptype == "register_ok":
-            messagebox.showinfo("Registered", f"Account '{packet['username']}' created! Please log in.")
+            messagebox.showinfo("Registered",
+                f"Account '{packet['username']}' created! Please log in.")
 
         elif ptype == "login_ok":
             self.username = packet["username"]
@@ -214,7 +224,8 @@ class WerewolfClient(tk.Tk):
             if snap_players:
                 self.players = snap_players
             if hasattr(self.current_frame, "update_phase"):
-                self.current_frame.update_phase({"phase": self.phase, "duration": self.timer_total})
+                self.current_frame.update_phase(
+                    {"phase": self.phase, "duration": self.timer_total})
             if hasattr(self.current_frame, "set_role"):
                 self.current_frame.set_role(self.role)
             if hasattr(self.current_frame, "update_players"):
@@ -244,6 +255,7 @@ class WerewolfClient(tk.Tk):
                 if not isinstance(self.current_frame, GameFrame):
                     self.show_game_screen()
             self.update_theme(self.phase)
+            _play_sound("phase")
             if hasattr(self.current_frame, "update_phase"):
                 self.current_frame.update_phase(packet)
 
@@ -255,6 +267,7 @@ class WerewolfClient(tk.Tk):
                 self.current_frame.update_timer(self.timer)
 
         elif ptype == "chat":
+            _play_sound("chat")
             if hasattr(self.current_frame, "add_chat"):
                 self.current_frame.add_chat(packet)
 
@@ -277,10 +290,12 @@ class WerewolfClient(tk.Tk):
                 self.current_frame.add_seer_result(packet)
 
         elif ptype == "vote_update":
+            _play_sound("vote")
             if hasattr(self.current_frame, "update_vote_counts"):
                 self.current_frame.update_vote_counts(packet)
 
         elif ptype == "eliminated":
+            _play_sound("alert")
             if hasattr(self.current_frame, "add_system_msg"):
                 self.current_frame.add_system_msg(packet.get("msg", ""))
             if hasattr(self.current_frame, "update_players"):
@@ -299,6 +314,7 @@ class WerewolfClient(tk.Tk):
         elif ptype == "game_over":
             self.game_results = packet
             self.phase        = "ended"
+            _play_sound("win")
             self.show_game_over()
 
         elif ptype == "error":
@@ -308,10 +324,6 @@ class WerewolfClient(tk.Tk):
             self.room_code = ""
             self.phase     = "lobby"
             self.show_lobby()
-
-    # ------------------------------------------------------------------ #
-    #  Frame navigation                                                    #
-    # ------------------------------------------------------------------ #
 
     def show_auth(self):
         self.phase = "lobby"
@@ -332,48 +344,40 @@ class WerewolfClient(tk.Tk):
         self.switch_frame(GameOverFrame)
 
 
-# ====================================================================== #
-#  Auth Frame — Register / Login                                          #
-# ====================================================================== #
-
+# ══════════════════════════════════════════════════════════════════════════════
+#  Auth Frame
+# ══════════════════════════════════════════════════════════════════════════════
 class AuthFrame(tk.Frame):
     def __init__(self, master):
         super().__init__(master, bg=THEMES["lobby"]["bg"])
         self.master = master
 
-        # Grid-based centering: spacer rows absorb extra space so content
-        # stays vertically centered regardless of window height.
-        self.rowconfigure(0, weight=1)
-        self.rowconfigure(1, weight=0)
-        self.rowconfigure(2, weight=1)
-        self.columnconfigure(0, weight=1)
+        tk.Label(self, text="WEREWOLF", font=master.font_title,
+                 bg=master["bg"], fg="#00d2ff").pack(pady=(80, 5))
+        tk.Label(self, text=":: Azrael of the Night ::", font=master.font_main,
+                 bg=master["bg"], fg="#e1e1e1").pack(pady=(0, 40))
 
-        center = tk.Frame(self, bg=master["bg"])
-        center.grid(row=1, column=0)
-
-        tk.Label(center, text="WEREWOLF", font=master.font_title,
-                 bg=master["bg"], fg="#00d2ff").pack(pady=(0, 5))
-        tk.Label(center, text="Azrael of the Night", font=master.font_main,
-                 bg=master["bg"], fg="#e1e1e1").pack(pady=(0, 30))
-
-        form = tk.Frame(center, bg=master["bg"])
+        form = tk.Frame(self, bg=master["bg"])
         form.pack()
-
         tk.Label(form, text="Username:", font=master.font_bold,
-                 bg=master["bg"], fg="#e1e1e1").grid(row=0, column=0, sticky="e", pady=8, padx=10)
+                 bg=master["bg"], fg="#e1e1e1").grid(row=0, column=0, sticky="e",
+                                                      pady=8, padx=10)
         self.user_entry = ttk.Entry(form, font=master.font_main, width=22)
         self.user_entry.grid(row=0, column=1, pady=8)
 
         tk.Label(form, text="Password:", font=master.font_bold,
-                 bg=master["bg"], fg="#e1e1e1").grid(row=1, column=0, sticky="e", pady=8, padx=10)
+                 bg=master["bg"], fg="#e1e1e1").grid(row=1, column=0, sticky="e",
+                                                      pady=8, padx=10)
         self.pass_entry = ttk.Entry(form, font=master.font_main, width=22, show="*")
         self.pass_entry.grid(row=1, column=1, pady=8)
         self.pass_entry.bind("<Return>", lambda e: self.do_login())
 
-        btn_frame = tk.Frame(center, bg=master["bg"])
+        btn_frame = tk.Frame(self, bg=master["bg"])
         btn_frame.pack(pady=30)
-        ttk.Button(btn_frame, text="Login",    width=14, command=self.do_login).pack(side="left", padx=10)
-        ttk.Button(btn_frame, text="Register", width=14, command=self.do_register).pack(side="left", padx=10)
+        ttk.Button(btn_frame, text="Login",    width=14,
+                   command=self.do_login).pack(side="left", padx=10)
+        ttk.Button(btn_frame, text="Register", width=14,
+                   command=self.do_register).pack(side="left", padx=10)
 
     def _get_fields(self):
         u = self.user_entry.get().strip()
@@ -394,35 +398,27 @@ class AuthFrame(tk.Frame):
             self.master.net.send({"type": "register", "username": u, "password": p})
 
 
-# ====================================================================== #
-#  Lobby Frame — create / join room                                       #
-# ====================================================================== #
-
+# ══════════════════════════════════════════════════════════════════════════════
+#  Lobby Frame
+# ══════════════════════════════════════════════════════════════════════════════
 class LobbyFrame(tk.Frame):
     def __init__(self, master):
         super().__init__(master, bg=THEMES["lobby"]["bg"])
         self.master = master
 
-        self.rowconfigure(0, weight=1)
-        self.rowconfigure(1, weight=0)
-        self.rowconfigure(2, weight=1)
-        self.columnconfigure(0, weight=1)
-
-        center = tk.Frame(self, bg=master["bg"])
-        center.grid(row=1, column=0)
-
-        tk.Label(center, text=f"Welcome, {master.username}", font=master.font_header,
-                 bg=master["bg"], fg="#00d2ff").pack(pady=(0, 30))
-
-        tk.Label(center, text="Enter Room Code to Join:", font=master.font_main,
+        tk.Label(self, text=f"Welcome, {master.username}", font=master.font_header,
+                 bg=master["bg"], fg="#00d2ff").pack(pady=(100, 30))
+        tk.Label(self, text="Enter Room Code to Join:", font=master.font_main,
                  bg=master["bg"], fg="#e1e1e1").pack()
-        self.room_entry = ttk.Entry(center, font=master.font_header, width=15, justify="center")
+        self.room_entry = ttk.Entry(self, font=master.font_header, width=15, justify="center")
         self.room_entry.pack(pady=10)
 
-        btn_frame = tk.Frame(center, bg=master["bg"])
+        btn_frame = tk.Frame(self, bg=master["bg"])
         btn_frame.pack(pady=30)
-        ttk.Button(btn_frame, text="Join Room",       width=18, command=self.join_room).pack(side="left", padx=15)
-        ttk.Button(btn_frame, text="Create New Room", width=18, command=self.create_room).pack(side="left", padx=15)
+        ttk.Button(btn_frame, text="Join Room",       width=18,
+                   command=self.join_room).pack(side="left", padx=15)
+        ttk.Button(btn_frame, text="Create New Room", width=18,
+                   command=self.create_room).pack(side="left", padx=15)
 
     def join_room(self):
         code = self.room_entry.get().strip().upper()
@@ -435,67 +431,122 @@ class LobbyFrame(tk.Frame):
         self.master.net.send({"type": "create", "room": "AUTO"})
 
 
-# ====================================================================== #
-#  Room Lobby Frame — waiting room                                        #
-# ====================================================================== #
-
+# ══════════════════════════════════════════════════════════════════════════════
+#  Room Lobby Frame
+# ══════════════════════════════════════════════════════════════════════════════
 class RoomLobbyFrame(tk.Frame):
     def __init__(self, master):
         super().__init__(master, bg=THEMES["lobby"]["bg"])
         self.master = master
 
+        # ── Header ──
         header = tk.Frame(self, bg=master["bg"])
-        header.pack(fill="x", pady=40, padx=60)
+        header.pack(fill="x", pady=(30, 10), padx=60)
 
-        tk.Label(header, text=f"ROOM: {master.room_code}", font=master.font_header,
+        room_row = tk.Frame(header, bg=master["bg"])
+        room_row.pack(side="left")
+        tk.Label(room_row, text="ROOM CODE", font=master.font_small,
+                 bg=master["bg"], fg="#888888").pack(anchor="w")
+
+        code_row = tk.Frame(room_row, bg=master["bg"])
+        code_row.pack(anchor="w")
+        tk.Label(code_row, text=master.room_code, font=("Courier", 28, "bold"),
                  bg=master["bg"], fg="#00d2ff").pack(side="left")
-        self.count_label = tk.Label(header, text="0 / 4 minimum players",
-                                     font=master.font_main, bg=master["bg"], fg="#e1e1e1")
+
+        self._copy_btn = tk.Label(code_row, text="  [Copy]", font=master.font_main,
+                                   bg=master["bg"], fg="#888888", cursor="hand2")
+        self._copy_btn.pack(side="left", padx=(8, 0))
+        self._copy_btn.bind("<Button-1>", self._copy_code)
+
+        self.count_label = tk.Label(header, text="",
+                                     font=master.font_header, bg=master["bg"], fg="#e1e1e1")
         self.count_label.pack(side="right")
 
-        list_frame = tk.Frame(self, bg="#16213e", padx=30, pady=30,
+        # ── Player list — use Listbox for flicker-free updates ──
+        list_frame = tk.Frame(self, bg="#16213e", padx=30, pady=20,
                               highlightthickness=2, highlightbackground="#00d2ff")
-        list_frame.pack(fill="both", expand=True, padx=60, pady=10)
+        list_frame.pack(fill="both", expand=True, padx=60, pady=5)
 
         tk.Label(list_frame, text="PLAYERS IN LOBBY:", font=master.font_bold,
-                 bg="#16213e", fg="#e1e1e1").pack(anchor="w", pady=(0, 15))
-        self.player_listbox = tk.Listbox(list_frame, font=master.font_bold,
-                                          bg="#16213e", fg="white",
-                                          borderwidth=0, highlightthickness=0,
-                                          selectbackground="#16213e")
+                 bg="#16213e", fg="#e1e1e1").pack(anchor="w", pady=(0, 10))
+
+        # Listbox — updates items in-place, no flicker
+        self.player_listbox = tk.Listbox(
+            list_frame,
+            font=master.font_bold,
+            bg="#16213e", fg="white",
+            selectbackground="#16213e",
+            activestyle="none",
+            borderwidth=0, highlightthickness=0,
+        )
         self.player_listbox.pack(fill="both", expand=True)
 
+        # ── Footer ──
         self.footer = tk.Frame(self, bg=master["bg"])
-        self.footer.pack(fill="x", pady=40, padx=60)
+        self.footer.pack(fill="x", pady=20, padx=60)
 
-        self.ready_btn = ttk.Button(self.footer, text="Ready", width=15, command=self.toggle_ready)
+        self.ready_btn = ttk.Button(self.footer, text="READY", width=15,
+                                     command=self.toggle_ready)
         self.ready_btn.pack(side="left", padx=10)
 
         self.start_btn = None
         if master.is_host:
-            self.start_btn = ttk.Button(self.footer, text="Start Game", width=15, command=self.start_game)
+            self.start_btn = ttk.Button(self.footer, text="Start Game", width=15,
+                                         command=self.start_game)
             self.start_btn.pack(side="left", padx=10)
 
-        ttk.Button(self.footer, text="Leave Room", width=15, command=self.leave_room).pack(side="right", padx=10)
+        ttk.Button(self.footer, text="Leave Room", width=15,
+                   command=self.leave_room).pack(side="right", padx=10)
 
         self.update_players(master.players)
 
-    def update_players(self, players):
-        self.player_listbox.delete(0, tk.END)
-        for p in players:
-            ready_tag = "✅ READY" if p.get("ready") else "❌ NOT READY"
-            host_tag  = " 👑" if p.get("host") else ""
-            if p["username"] == self.master.username:
-                self.master.is_ready = p.get("ready", False)
-                self.ready_btn.config(text="UNREADY" if self.master.is_ready else "READY")
-            self.player_listbox.insert(
-                tk.END, f"  {p['username']}{host_tag}".ljust(30) + ready_tag
-            )
-        self.count_label.config(text=f"{len(players)} / 4 minimum players")
+    def _copy_code(self, event=None):
+        self.master.clipboard_clear()
+        self.master.clipboard_append(self.master.room_code)
+        self._copy_btn.config(text="  [Copied!]", fg="#00d2ff")
+        self.after(2000, lambda: self._copy_btn.config(text="  [Copy]", fg="#888888"))
 
-        # Sync host button visibility
+    def update_players(self, players):
+        # ── Update listbox in-place (no flicker) ──
+        self.player_listbox.delete(0, tk.END)
+
+        ready_count = sum(1 for p in players if p.get("ready"))
+        total       = len(players)
+        enough      = total >= 4
+        status_color = "#4ade80" if (enough and ready_count == total > 0) else "#e1e1e1"
+        self.count_label.config(
+            text=f"{total} player{'s' if total != 1 else ''}  |  {ready_count}/{total} ready",
+            fg=status_color
+        )
+
+        for p in players:
+            ready   = p.get("ready", False)
+            is_host = p.get("host", False)
+            is_me   = p["username"] == self.master.username
+
+            if is_me:
+                self.master.is_ready = ready
+                self.ready_btn.config(text="UNREADY" if ready else "READY")
+
+            host_tag  = " [HOST]" if is_host else ""
+            me_tag    = " <YOU>" if is_me else ""
+            ready_tag = " [READY]" if ready else " [waiting]"
+
+            line = f"  {p['username']}{host_tag}{me_tag}".ljust(36) + ready_tag
+            self.player_listbox.insert(tk.END, line)
+
+            # Color per row
+            if ready:
+                self.player_listbox.itemconfig(tk.END, fg="#4ade80")
+            elif is_me:
+                self.player_listbox.itemconfig(tk.END, fg="#00d2ff")
+            else:
+                self.player_listbox.itemconfig(tk.END, fg="#aaaaaa")
+
+        # Sync start button
         if self.master.is_host and self.start_btn is None:
-            self.start_btn = ttk.Button(self.footer, text="Start Game", width=15, command=self.start_game)
+            self.start_btn = ttk.Button(self.footer, text="Start Game", width=15,
+                                         command=self.start_game)
             self.start_btn.pack(side="left", padx=10, after=self.ready_btn)
         elif not self.master.is_host and self.start_btn is not None:
             self.start_btn.destroy()
@@ -511,19 +562,19 @@ class RoomLobbyFrame(tk.Frame):
         self.master.net.send({"type": "leave"})
 
 
-# ====================================================================== #
-#  Game Frame                                                             #
-# ====================================================================== #
-
+# ══════════════════════════════════════════════════════════════════════════════
+#  Game Frame
+# ══════════════════════════════════════════════════════════════════════════════
 class GameFrame(tk.Frame):
     def __init__(self, master):
         super().__init__(master, bg=THEMES["lobby"]["bg"])
-        self.master = master
-        self._hunter_dialog = None
+        self.master          = master
+        self._hunter_dialog  = None
 
-        # ---- Top bar ---- (no fixed height, let content determine size)
-        self.top_bar = tk.Frame(self, bg="#16213e")
+        # ── Top bar ──
+        self.top_bar = tk.Frame(self, bg="#16213e", height=100)
         self.top_bar.pack(fill="x")
+        self.top_bar.pack_propagate(False)
 
         self.info_top = tk.Frame(self.top_bar, bg="#16213e")
         self.info_top.pack(fill="x", padx=30, pady=(15, 0))
@@ -533,25 +584,30 @@ class GameFrame(tk.Frame):
         self.phase_label.pack(side="left")
 
         self.timer_label = tk.Label(self.info_top, text="0s",
-                                     font=master.font_timer, bg="#16213e", fg="#ffffff", padx=20)
+                                     font=master.font_timer, bg="#16213e",
+                                     fg="#ffffff", padx=20)
         self.timer_label.pack(side="left")
 
         self.ping_label = tk.Label(self.info_top, text="Ping: --",
-                                    font=master.font_main, bg="#16213e", fg="#888888", padx=10)
+                                    font=master.font_main, bg="#16213e",
+                                    fg="#888888", padx=10)
         self.ping_label.pack(side="left")
 
+        role_icon  = ROLE_ICONS.get(master.role, "[?]")
+        role_color = ROLE_COLORS.get(master.role, "#00d2ff")
         self.role_label = tk.Label(self.info_top,
-                                    text=f"ROLE: {master.role.upper()}",
-                                    font=master.font_header, bg="#16213e", fg="#00d2ff")
+                                    text=f"{role_icon} {master.role.upper()}",
+                                    font=master.font_header, bg="#16213e", fg=role_color)
         self.role_label.pack(side="right")
 
         timer_frame = tk.Frame(self.top_bar, bg="#16213e")
         timer_frame.pack(fill="x", padx=30, pady=(5, 15))
-        self.timer_bar = ttk.Progressbar(timer_frame, orient="horizontal", mode="determinate",
-                                          maximum=100, style="Timer.Horizontal.TProgressbar")
+        self.timer_bar = ttk.Progressbar(timer_frame, orient="horizontal",
+                                          mode="determinate", maximum=100,
+                                          style="Timer.Horizontal.TProgressbar")
         self.timer_bar.pack(fill="x", expand=True)
 
-        # ---- Content area ----
+        # ── Content ──
         self.content = tk.Frame(self, bg=master["bg"])
         self.content.pack(fill="both", expand=True)
 
@@ -564,36 +620,61 @@ class GameFrame(tk.Frame):
 
         self.chat_area = scrolledtext.ScrolledText(
             self.chat_frame, bg="#16213e", fg="white", font=master.font_chat,
-            state="disabled", borderwidth=0, highlightthickness=1, highlightbackground="#333"
+            state="disabled", borderwidth=0,
+            highlightthickness=1, highlightbackground="#333"
         )
         self.chat_area.pack(fill="both", expand=True)
 
+        # Text tags
+        self.chat_area.tag_config("system",    foreground="#ff8c00")
+        self.chat_area.tag_config("wolf_chat", foreground="#ff6666",
+                                   background="#1a0000")
+        self.chat_area.tag_config("dead_chat", foreground="#666666")
+        self.chat_area.tag_config("seer",      foreground="#c084fc")
+        self.chat_area.tag_config("timestamp", foreground="#445566")
+        self.chat_area.tag_config("normal",    foreground="#e1e1e1")
+
         input_frame = tk.Frame(self.chat_frame, bg=master["bg"])
         input_frame.pack(fill="x", pady=(15, 0))
-
         self.msg_entry = ttk.Entry(input_frame, font=master.font_main)
         self.msg_entry.pack(side="left", fill="x", expand=True, padx=(0, 10))
         self.msg_entry.bind("<Return>", lambda e: self.send_chat())
-        ttk.Button(input_frame, text="Send", width=10, command=self.send_chat).pack(side="right")
+        ttk.Button(input_frame, text="Send", width=10,
+                   command=self.send_chat).pack(side="right")
 
-        # Right panel — player list + vote tally
-        # Use fill="y" without a fixed width so it shrinks/grows with the window.
-        self.right_frame = tk.Frame(self.content, bg=master["bg"], padx=20, pady=20)
+        # Right panel — Listbox for flicker-free player updates
+        self.right_frame = tk.Frame(self.content, bg=master["bg"], width=350,
+                                     padx=10, pady=20)
         self.right_frame.pack(side="right", fill="y")
+        self.right_frame.pack_propagate(False)
 
-        tk.Label(self.right_frame, text="PLAYER STATUS", font=master.font_bold,
-                 bg=master["bg"], fg="#e1e1e1").pack(pady=(0, 10))
+        tk.Label(self.right_frame, text="PLAYERS", font=master.font_bold,
+                 bg=master["bg"], fg="#e1e1e1").pack(pady=(0, 5))
 
-        self.players_container = tk.Frame(self.right_frame, bg=master["bg"])
-        self.players_container.pack(fill="x")
+        # Player listbox (read-only display, no selection highlight)
+        self.player_listbox = tk.Listbox(
+            self.right_frame,
+            font=master.font_small,
+            bg="#16213e", fg="#e1e1e1",
+            selectbackground="#16213e",
+            activestyle="none",
+            borderwidth=0, highlightthickness=1,
+            highlightbackground="#333",
+        )
+        self.player_listbox.pack(fill="both", expand=True)
 
-        # Vote tally (hidden until voting phase)
+        # Action buttons frame — rebuilt only when phase changes
+        self.action_frame = tk.Frame(self.right_frame, bg=master["bg"])
+        self.action_frame.pack(fill="x", pady=(8, 0))
+
+        # Vote tally
         self.vote_frame = tk.Frame(self.right_frame, bg=master["bg"])
-        self.vote_frame.pack(fill="x", pady=(15, 0))
-        self.vote_title = tk.Label(self.vote_frame, text="VOTE TALLY", font=master.font_bold,
+        self.vote_title = tk.Label(self.vote_frame, text="VOTE TALLY",
+                                    font=master.font_bold,
                                     bg=master["bg"], fg="#ff4d4d")
         self.vote_title.pack(anchor="w")
-        self.vote_text = tk.Label(self.vote_frame, text="", font=master.font_chat,
+        self.vote_text = tk.Label(self.vote_frame, text="",
+                                   font=master.font_chat,
                                    bg=master["bg"], fg="#e1e1e1", justify="left")
         self.vote_text.pack(anchor="w")
         self.vote_frame.pack_forget()
@@ -601,12 +682,13 @@ class GameFrame(tk.Frame):
         self.update_players(master.players)
         self.apply_theme(THEMES.get(master.phase, THEMES["lobby"]))
 
+    # ── Theme ──────────────────────────────────────────────────────────────────
     def apply_theme(self, theme):
         self.configure(bg=theme["bg"])
         self.content.configure(bg=theme["bg"])
         self.chat_frame.configure(bg=theme["bg"])
         self.right_frame.configure(bg=theme["bg"])
-        self.players_container.configure(bg=theme["bg"])
+        self.action_frame.configure(bg=theme["bg"])
         self.vote_frame.configure(bg=theme["bg"])
         self.vote_title.configure(bg=theme["bg"])
         self.vote_text.configure(bg=theme["bg"])
@@ -625,98 +707,178 @@ class GameFrame(tk.Frame):
                          background=theme["accent"], troughcolor=theme["panel"])
         if self.master.phase == "day":
             self.phase_label.configure(fg="#243b55")
-            self.chat_area.configure(bg="#ffffff", fg="#333333", highlightbackground="#cccccc")
+            self.chat_area.configure(bg="#ffffff", fg="#333333",
+                                      highlightbackground="#cccccc")
+            self.chat_area.tag_config("normal", foreground="#000000")
         else:
             self.phase_label.configure(fg=theme["accent"])
-            self.chat_area.configure(bg="#16213e", fg="#ffffff", highlightbackground="#444444")
+            self.chat_area.configure(bg="#16213e", fg="#ffffff",
+                                      highlightbackground="#444444")
+            self.chat_area.tag_config("normal", foreground="#e1e1e1")
 
+    # ── Players — Listbox rows (no flicker) ────────────────────────────────────
     def update_players(self, players):
-        for w in self.players_container.winfo_children():
-            w.destroy()
+        """
+        Update the player listbox rows and rebuild action buttons.
+        Listbox.delete+insert is visually smooth — no widget destruction flicker.
+        Action buttons are in a separate frame that's only rebuilt on phase change,
+        not on every players_list broadcast.
+        """
+        self.player_listbox.delete(0, tk.END)
         theme = THEMES.get(self.master.phase, THEMES["lobby"])
+
         for p in players:
             alive     = p.get("alive", True)
             connected = p.get("connected", True)
-            icon      = "👤" if alive else "👻"
-            conn_tag  = "" if connected else " [OFFLINE]"
-            color     = theme["text"] if (alive and connected) else "#888888"
             name      = p["username"]
             is_me     = name == self.master.username
             if is_me:
-                name += " (YOU)"
                 self.master.alive = alive
 
-            p_frame = tk.Frame(self.players_container, bg=theme["panel"], pady=8, padx=10,
-                                highlightthickness=1, highlightbackground="#444")
-            p_frame.pack(fill="x", pady=3)
-            tk.Label(p_frame, text=f"{icon} {name}{conn_tag}",
-                     bg=theme["panel"], fg=color, font=self.master.font_bold).pack(side="left")
+            status = ""
+            if not alive:
+                status = " [dead]"
+            elif not connected:
+                status = " [offline]"
 
-            if self.master.alive and alive and connected and not is_me:
-                phase = self.master.phase
-                role  = self.master.role
-                if phase == "voting":
-                    ttk.Button(p_frame, text="VOTE", width=6,
-                               command=lambda u=p["username"]: self.vote(u)).pack(side="right")
-                elif phase == "night":
-                    if role == "Werewolf":
-                        ttk.Button(p_frame, text="KILL", width=6,
-                                   command=lambda u=p["username"]: self.kill(u)).pack(side="right")
-                    elif role == "Seer":
-                        btn = ttk.Button(p_frame, text="CHECK", width=6,
-                                         command=lambda u=p["username"]: self.check(u))
-                        btn.pack(side="right")
-                        if self.master.seer_used:
-                            btn.state(["disabled"])
-                    elif role == "Doctor":
-                        ttk.Button(p_frame, text="PROTECT", width=8,
-                                   command=lambda u=p["username"]: self.protect(u)).pack(side="right")
+            me_tag   = " <YOU>" if is_me else ""
+            line     = f" {name}{me_tag}{status}"
+            self.player_listbox.insert(tk.END, line)
 
-    def update_phase(self, packet):
-        phase_name = packet["phase"].upper() + " PHASE"
-        self.phase_label.config(text=phase_name)
-        if packet.get("msg"):
-            self.add_system_msg(packet["msg"])
-        # Show/hide vote tally panel
-        if packet["phase"] == "voting":
-            self.vote_frame.pack(fill="x", pady=(15, 0))
-            self.vote_text.config(text="No votes yet.")
-        else:
-            self.vote_frame.pack_forget()
-        self.update_players(self.master.players)
+            if not alive:
+                self.player_listbox.itemconfig(tk.END, fg="#555555")
+            elif not connected:
+                self.player_listbox.itemconfig(tk.END, fg="#777777")
+            elif is_me:
+                self.player_listbox.itemconfig(tk.END, fg="#00d2ff",
+                                               bg=theme["panel"])
+            else:
+                self.player_listbox.itemconfig(tk.END, fg=theme["text"])
 
+        self._rebuild_action_buttons(players)
+
+    def _rebuild_action_buttons(self, players):
+        """Rebuild action buttons — only called when phase changes or player list arrives."""
+        for w in self.action_frame.winfo_children():
+            w.destroy()
+
+        phase = self.master.phase
+        role  = self.master.role
+        if not self.master.alive:
+            return
+
+        alive_others = [p for p in players
+                        if p.get("alive") and p.get("connected")
+                        and p["username"] != self.master.username]
+
+        for p in alive_others:
+            name = p["username"]
+            btn_row = tk.Frame(self.action_frame, bg=self.master["bg"])
+            btn_row.pack(fill="x", pady=1)
+            tk.Label(btn_row, text=name, font=self.master.font_small,
+                     bg=self.master["bg"], fg="#e1e1e1", width=14,
+                     anchor="w").pack(side="left")
+
+            if phase == "voting":
+                ttk.Button(btn_row, text="VOTE", width=6,
+                           command=lambda u=name: self.vote(u)).pack(side="right")
+            elif phase == "night":
+                if role == "Werewolf":
+                    ttk.Button(btn_row, text="KILL", width=6,
+                               command=lambda u=name: self.kill(u)).pack(side="right")
+                elif role == "Seer":
+                    btn = ttk.Button(btn_row, text="CHECK", width=6,
+                                     command=lambda u=name: self.check(u))
+                    btn.pack(side="right")
+                    if self.master.seer_used:
+                        btn.state(["disabled"])
+                elif role == "Doctor":
+                    ttk.Button(btn_row, text="HEAL", width=6,
+                               command=lambda u=name: self.protect(u)).pack(side="right")
+
+    # ── Timer ──────────────────────────────────────────────────────────────────
     def update_timer(self, seconds):
         sec_int = int(seconds)
         self.timer_label.config(text=f"{sec_int}s")
         if self.master.timer_total > 0:
-            self.timer_bar["value"] = (sec_int / self.master.timer_total) * 100
-        self.timer_label.config(fg="#ff4d4d" if sec_int <= 5 else "#ffffff")
+            pct = (sec_int / self.master.timer_total) * 100
+            self.timer_bar["value"] = pct
+            style = ttk.Style()
+            if pct > 50:
+                bar_color = "#4ade80"
+            elif pct > 25:
+                bar_color = "#fbbf24"
+            else:
+                bar_color = "#ef4444"
+            style.configure("Timer.Horizontal.TProgressbar", background=bar_color)
+        self.timer_label.config(
+            fg="#ff4d4d" if sec_int <= 5 and sec_int % 2 == 0 else "#ffffff"
+        )
         self.timer_bar.update_idletasks()
 
-    def update_ping(self, ping_str):
-        self.ping_label.config(text=f"Ping: {ping_str}")
+    # ── Phase ──────────────────────────────────────────────────────────────────
+    def update_phase(self, packet):
+        phase = packet["phase"]
+        self.phase_label.config(text=phase.upper() + " PHASE")
+        if packet.get("msg"):
+            self.add_system_msg(packet["msg"])
+        if phase == "voting":
+            self.vote_frame.pack(fill="x", pady=(8, 0))
+            self.vote_text.config(text="No votes yet.")
+        else:
+            self.vote_frame.pack_forget()
+        self.update_players(self.master.players)
 
     def update_vote_counts(self, packet):
         votes_in = packet.get("votes_in", 0)
         total    = packet.get("total", 0)
         self.vote_text.config(text=f"{votes_in}/{total} voted")
 
+    def update_ping(self, ping_str):
+        self.ping_label.config(text=f"Ping: {ping_str}")
+
     def set_role(self, role):
         self.master.role = role
-        self.role_label.config(text=f"ROLE: {role.upper()}")
+        icon  = ROLE_ICONS.get(role, "[?]")
+        color = ROLE_COLORS.get(role, "#00d2ff")
+        self.role_label.config(text=f"{icon} {role.upper()}", fg=color)
 
+    # ── Chat ───────────────────────────────────────────────────────────────────
     def add_chat(self, packet):
-        self._display_msg(f"[{packet.get('sender','???')}]: {packet.get('msg','')}")
+        sender    = packet.get("sender", "???")
+        msg       = packet.get("msg", "")
+        is_wolf   = packet.get("wolf_chat", False)
+        is_dead   = packet.get("dead", False)
+        timestamp = time.strftime("%H:%M")
+
+        self.chat_area.config(state="normal")
+        self.chat_area.insert(tk.END, f"[{timestamp}] ", "timestamp")
+        if is_wolf:
+            self.chat_area.insert(tk.END, f"[WOLF] {sender}: {msg}\n", "wolf_chat")
+        elif is_dead:
+            self.chat_area.insert(tk.END, f"[dead] {sender}: {msg}\n", "dead_chat")
+        else:
+            self.chat_area.insert(tk.END, f"{sender}: {msg}\n", "normal")
+        self.chat_area.config(state="disabled")
+        self.chat_area.see(tk.END)
 
     def add_seer_result(self, packet):
-        self._display_msg(f"🔮 SEER VISION: {packet.get('target')} is a {packet.get('role','?')}!")
+        target    = packet.get("target")
+        role      = packet.get("role", "?")
+        icon      = ROLE_ICONS.get(role, "[?]")
+        timestamp = time.strftime("%H:%M")
+        self.chat_area.config(state="normal")
+        self.chat_area.insert(tk.END, f"[{timestamp}] ", "timestamp")
+        self.chat_area.insert(
+            tk.END, f"[SEER] {target} is {icon} {role}!\n", "seer")
+        self.chat_area.config(state="disabled")
+        self.chat_area.see(tk.END)
 
     def add_system_msg(self, msg):
-        self._display_msg(f"✨ SYSTEM: {msg}")
-
-    def _display_msg(self, text):
+        timestamp = time.strftime("%H:%M")
         self.chat_area.config(state="normal")
-        self.chat_area.insert(tk.END, str(text) + "\n")
+        self.chat_area.insert(tk.END, f"[{timestamp}] ", "timestamp")
+        self.chat_area.insert(tk.END, f"{msg}\n", "system")
         self.chat_area.config(state="disabled")
         self.chat_area.see(tk.END)
 
@@ -726,20 +888,15 @@ class GameFrame(tk.Frame):
             self.master.net.send({"type": "chat", "msg": msg})
             self.msg_entry.delete(0, tk.END)
 
-    def vote(self, target):
-        self.master.net.send({"type": "vote", "target": target})
-
-    def kill(self, target):
-        self.master.net.send({"type": "kill", "target": target})
-
+    def vote(self, target):    self.master.net.send({"type": "vote",    "target": target})
+    def kill(self, target):    self.master.net.send({"type": "kill",    "target": target})
+    def protect(self, target): self.master.net.send({"type": "protect", "target": target})
     def check(self, target):
         self.master.net.send({"type": "check", "target": target})
         self.master.seer_used = True
         self.update_players(self.master.players)
 
-    def protect(self, target):
-        self.master.net.send({"type": "protect", "target": target})
-
+    # ── Hunter ─────────────────────────────────────────────────────────────────
     def show_hunter_dialog(self):
         if self._hunter_dialog and self._hunter_dialog.winfo_exists():
             return
@@ -748,18 +905,16 @@ class GameFrame(tk.Frame):
         self._hunter_dialog.configure(bg="#1a1a2e")
         self._hunter_dialog.grab_set()
 
-        tk.Label(self._hunter_dialog, text="You were eliminated!",
+        tk.Label(self._hunter_dialog, text="[HUNTER] You were eliminated!",
                  font=self.master.font_header, bg="#1a1a2e", fg="#e94560").pack(pady=(30, 5))
-        tk.Label(self._hunter_dialog, text="Choose someone to shoot (20s):",
+        tk.Label(self._hunter_dialog, text="Choose someone to take with you (20s):",
                  font=self.master.font_main, bg="#1a1a2e", fg="#e1e1e1").pack(pady=(0, 20))
 
         alive_others = [p["username"] for p in self.master.players
                         if p.get("alive") and p["username"] != self.master.username]
-
         for uname in alive_others:
             ttk.Button(self._hunter_dialog, text=uname, width=20,
                        command=lambda u=uname: self._fire_hunter_shot(u)).pack(pady=4)
-
         ttk.Button(self._hunter_dialog, text="Don't shoot", width=20,
                    command=self._hunter_dialog.destroy).pack(pady=(20, 30))
 
@@ -769,53 +924,75 @@ class GameFrame(tk.Frame):
             self._hunter_dialog.destroy()
 
 
-# ====================================================================== #
-#  Game Over Frame                                                        #
-# ====================================================================== #
-
+# ══════════════════════════════════════════════════════════════════════════════
+#  Game Over Frame
+# ══════════════════════════════════════════════════════════════════════════════
 class GameOverFrame(tk.Frame):
     def __init__(self, master):
         super().__init__(master, bg=THEMES["ended"]["bg"])
-        self.master = master
-        results    = master.game_results or {}
-        winner     = results.get("winner", "DRAW").upper()
-        roles      = results.get("roles", {})
-        win_color  = "#ffd700" if winner == "VILLAGER" else "#ff4d4d"
+        self.master  = master
+        results      = master.game_results or {}
+        winner       = results.get("winner", "DRAW").upper()
+        roles        = results.get("roles", {})
+        villager_win = winner == "VILLAGER"
+        win_color    = "#ffd700" if villager_win else "#ff4d4d"
+        win_tag      = "[ VILLAGERS WIN ]" if villager_win else "[ WEREWOLVES WIN ]"
 
-        tk.Label(self, text="GAME OVER", font=master.font_title,
-                 bg=master["bg"], fg="#e1e1e1").pack(pady=(80, 20))
-        tk.Label(self, text=f"{winner}S WIN!", font=("Helvetica", 40, "bold"),
-                 bg=master["bg"], fg=win_color).pack(pady=20)
+        # ── Banner ──
+        tk.Label(self, text="=== GAME OVER ===", font=master.font_title,
+                 bg=master["bg"], fg="#e1e1e1").pack(pady=(25, 5))
 
-        roles_frame = tk.Frame(self, bg="#16213e", padx=40, pady=40,
+        self._winner_label = tk.Label(self, text=win_tag,
+                                       font=("Courier", 28, "bold"),
+                                       bg=master["bg"], fg=win_color)
+        self._winner_label.pack(pady=(0, 8))
+
+        # Pulse animation
+        self._pulse_colors = [win_color, "#ffffff"]
+        self._pulse_idx    = 0
+        self._animate_winner()
+
+        # ── Role reveal ──
+        roles_frame = tk.Frame(self, bg="#16213e", padx=30, pady=15,
                                 highlightthickness=2, highlightbackground=win_color)
-        roles_frame.pack(pady=40, padx=100, fill="both", expand=True)
+        roles_frame.pack(pady=8, padx=80, fill="both", expand=True)
 
-        tk.Label(roles_frame, text="FINAL REVEAL:", font=master.font_header,
-                 bg="#16213e", fg="#e1e1e1").pack(pady=(0, 20))
+        tk.Label(roles_frame, text="-- FINAL REVEAL --", font=master.font_header,
+                 bg="#16213e", fg="#e1e1e1").pack(pady=(0, 8))
 
         scroll_frame = tk.Frame(roles_frame, bg="#16213e")
         scroll_frame.pack(fill="both", expand=True)
-        canvas   = tk.Canvas(scroll_frame, bg="#16213e", highlightthickness=0)
-        scrollbar = ttk.Scrollbar(scroll_frame, orient="vertical", command=canvas.yview)
-        inner    = tk.Frame(canvas, bg="#16213e")
-        inner.bind("<Configure>", lambda e: canvas.configure(scrollregion=canvas.bbox("all")))
+        canvas    = tk.Canvas(scroll_frame, bg="#16213e", highlightthickness=0)
+        scrollbar = ttk.Scrollbar(scroll_frame, orient="vertical",
+                                   command=canvas.yview)
+        inner     = tk.Frame(canvas, bg="#16213e")
+        inner.bind("<Configure>",
+                   lambda e: canvas.configure(scrollregion=canvas.bbox("all")))
         canvas.create_window((0, 0), window=inner, anchor="nw")
         canvas.configure(yscrollcommand=scrollbar.set)
         canvas.pack(side="left", fill="both", expand=True)
         scrollbar.pack(side="right", fill="y")
 
         for user, role in roles.items():
-            r_color = "#ff4d4d" if role == "Werewolf" else "#00d2ff"
-            f = tk.Frame(inner, bg="#16213e", pady=5)
-            f.pack(fill="x")
-            tk.Label(f, text=user, font=master.font_bold, bg="#16213e",
-                     fg="white", width=20, anchor="w").pack(side="left")
-            tk.Label(f, text=f"➔  {role}", font=master.font_bold,
-                     bg="#16213e", fg=r_color).pack(side="left")
+            icon    = ROLE_ICONS.get(role, "[?]")
+            r_color = ROLE_COLORS.get(role, "#e1e1e1")
+            f = tk.Frame(inner, bg="#1e2a3a", pady=6, padx=10)
+            f.pack(fill="x", pady=2, padx=4)
+            tk.Label(f, text=user, font=master.font_bold,
+                     bg="#1e2a3a", fg="white", width=18, anchor="w").pack(side="left")
+            tk.Label(f, text=f"{icon}  {role}", font=master.font_bold,
+                     bg="#1e2a3a", fg=r_color).pack(side="left", padx=(10, 0))
 
         ttk.Button(self, text="RETURN TO LOBBY", width=25,
-                   command=self.return_to_lobby).pack(pady=40)
+                   command=self.return_to_lobby).pack(pady=12)
+
+    def _animate_winner(self):
+        self._pulse_idx = 1 - self._pulse_idx
+        try:
+            self._winner_label.config(fg=self._pulse_colors[self._pulse_idx])
+            self.after(700, self._animate_winner)
+        except tk.TclError:
+            pass
 
     def return_to_lobby(self):
         self.master.phase = "lobby"
