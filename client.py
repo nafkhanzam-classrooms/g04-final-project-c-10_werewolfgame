@@ -711,11 +711,17 @@ class GameFrame(tk.Frame):
             self.chat_area.configure(bg="#ffffff", fg="#333333",
                                       highlightbackground="#cccccc")
             self.chat_area.tag_config("normal", foreground="#000000")
+            self.player_listbox.configure(bg="#ffffff", fg="#333333",
+                                          highlightbackground="#cccccc",
+                                          selectbackground="#ffffff")
         else:
             self.phase_label.configure(fg=theme["accent"])
             self.chat_area.configure(bg="#16213e", fg="#ffffff",
                                       highlightbackground="#444444")
             self.chat_area.tag_config("normal", foreground="#e1e1e1")
+            self.player_listbox.configure(bg="#16213e", fg="#e1e1e1",
+                                          highlightbackground="#444444",
+                                          selectbackground="#16213e")
 
     # ── Players — Listbox rows (no flicker) ────────────────────────────────────
     def update_players(self, players):
@@ -812,8 +818,9 @@ class GameFrame(tk.Frame):
             else:
                 bar_color = "#ef4444"
             style.configure("Timer.Horizontal.TProgressbar", background=bar_color)
+        default_fg = "#000000" if self.master.phase == "day" else "#ffffff"
         self.timer_label.config(
-            fg="#ff4d4d" if sec_int <= 5 and sec_int % 2 == 0 else "#ffffff"
+            fg="#ff4d4d" if sec_int <= 5 and sec_int % 2 == 0 else default_fg
         )
         self.timer_bar.update_idletasks()
 
