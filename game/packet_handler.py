@@ -24,7 +24,7 @@ class PacketHandler:
         self._phase_timers = {}   # room_name -> threading.Event (cancel)
 
     # ------------------------------------------------------------------ #
-    #  Dispatch                                                            #
+    #  Dispatch                                                          #
     # ------------------------------------------------------------------ #
 
     def handle(self, player, packet):
@@ -346,7 +346,6 @@ class PacketHandler:
                 room.game.night_kills[player.username] = target
         self.broadcast_wolves(room, {"type": "system",
                                       "msg": f"{player.username} targeted {target}"})
-        self._check_night_early_end(room)
 
     def on_protect(self, player, packet):
         if not player.room or player.role != Role.DOCTOR:
@@ -359,7 +358,6 @@ class PacketHandler:
             if target in room.game.players and room.game.players[target].alive:
                 room.game.night_protect = target
         self.send(player, {"type": "system", "msg": f"You chose to protect {target}."})
-        self._check_night_early_end(room)
 
     def on_check(self, player, packet):
         if not player.room or player.role != Role.SEER:
@@ -381,22 +379,6 @@ class PacketHandler:
         self.send(player, {"type": "seer_result", "target": target,
                             "is_werewolf": is_wolf, "role": target_p.role.value,
                             "msg": f"{target} is a {target_p.role.value}."})
-        self._check_night_early_end(room)
-
-    def _check_night_early_end(self, room):
-        """End night phase early when all living night-action roles have submitted."""
-        with room.lock:
-            alive = room.game.get_alive_players()
-            wolves      = [u for u in alive if room.game.players[u].role == Role.WEREWOLF]
-            seers       = [u for u in alive if room.game.players[u].role == Role.SEER]
-            doctors     = [u for u in alive if room.game.players[u].role == Role.DOCTOR]
-            all_wolves_voted  = all(u in room.game.night_kills for u in wolves)
-            all_seers_checked = all(u in room.game.seer_check  for u in seers)
-            all_doctors_done  = (not doctors) or (room.game.night_protect is not None)
-            ready = all_wolves_voted and all_seers_checked and all_doctors_done
-        if ready and room.game.phase == Phase.NIGHT:
-            self._cancel_timer(room)
-            self._night_timeout(room)
 
     # ------------------------------------------------------------------ #
     #  Voting                                                              #
