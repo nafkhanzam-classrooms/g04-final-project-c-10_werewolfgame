@@ -411,7 +411,7 @@ class PacketHandler:
             votes_in    = len(room.game.votes)
 
         self.broadcast(room, {"type": "system", "msg": f"{player.username} has voted."})
-        self.broadcast(room, {"type": "vote_update", "vote_counts": vote_counts,
+        self.broadcast(room, {"type": "vote_update",
                                "votes_in": votes_in, "total": alive_count})
 
     # ------------------------------------------------------------------ #

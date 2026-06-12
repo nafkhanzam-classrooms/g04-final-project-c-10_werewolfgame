@@ -665,12 +665,9 @@ class GameFrame(tk.Frame):
         self.ping_label.config(text=f"Ping: {ping_str}")
 
     def update_vote_counts(self, packet):
-        counts    = packet.get("vote_counts", {})
-        votes_in  = packet.get("votes_in", 0)
-        total     = packet.get("total", 0)
-        lines     = [f"{t}: {v} vote(s)" for t, v in counts.items()]
-        lines.append(f"({votes_in}/{total} voted)")
-        self.vote_text.config(text="\n".join(lines))
+        votes_in = packet.get("votes_in", 0)
+        total    = packet.get("total", 0)
+        self.vote_text.config(text=f"{votes_in}/{total} voted")
 
     def set_role(self, role):
         self.master.role = role
