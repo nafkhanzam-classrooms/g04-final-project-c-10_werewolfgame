@@ -6,7 +6,7 @@ import json
 import queue
 import time
 
-HOST = "127.0.0.1"
+HOST = "143.198.217.44"
 PORT = 5000
 MAX_LINE_BYTES = 64 * 1024   # cap a single packet line at 64KB
 
