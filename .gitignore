@@ -1,1 +1,28 @@
 logs/
+
+# Python bytecode
+__pycache__/
+*.pyc
+*.pyo
+
+# SQLite database — runtime state
+*.db
+*.db-journal
+
+# Server logs
+logs/
+*.log
+
+# Editor / IDE configs
+.vscode/
+.idea/
+*.swp
+
+# Virtual environments
+venv/
+.venv/
+env/
+
+# OS junk
+.DS_Store
+Thumbs.db
