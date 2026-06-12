@@ -227,6 +227,9 @@ class WerewolfClient(tk.Tk):
         elif ptype == "players_list":
             self.players = packet.get("players", [])
             self.phase   = packet.get("phase", "lobby")
+            for p in self.players:
+                if p["username"] == self.username:
+                    self.is_host = p.get("host", False)
             if hasattr(self.current_frame, "update_players"):
                 self.current_frame.update_players(self.players)
 
@@ -442,16 +445,18 @@ class RoomLobbyFrame(tk.Frame):
                                           selectbackground="#16213e")
         self.player_listbox.pack(fill="both", expand=True)
 
-        footer = tk.Frame(self, bg=master["bg"])
-        footer.pack(fill="x", pady=40, padx=60)
+        self.footer = tk.Frame(self, bg=master["bg"])
+        self.footer.pack(fill="x", pady=40, padx=60)
 
-        self.ready_btn = ttk.Button(footer, text="Ready", width=15, command=self.toggle_ready)
+        self.ready_btn = ttk.Button(self.footer, text="Ready", width=15, command=self.toggle_ready)
         self.ready_btn.pack(side="left", padx=10)
 
+        self.start_btn = None
         if master.is_host:
-            ttk.Button(footer, text="Start Game", width=15, command=self.start_game).pack(side="left", padx=10)
+            self.start_btn = ttk.Button(self.footer, text="Start Game", width=15, command=self.start_game)
+            self.start_btn.pack(side="left", padx=10)
 
-        ttk.Button(footer, text="Leave Room", width=15, command=self.leave_room).pack(side="right", padx=10)
+        ttk.Button(self.footer, text="Leave Room", width=15, command=self.leave_room).pack(side="right", padx=10)
 
         self.update_players(master.players)
 
@@ -467,6 +472,14 @@ class RoomLobbyFrame(tk.Frame):
                 tk.END, f"  {p['username']}{host_tag}".ljust(30) + ready_tag
             )
         self.count_label.config(text=f"{len(players)} / 4 minimum players")
+
+        # Sync host button visibility
+        if self.master.is_host and self.start_btn is None:
+            self.start_btn = ttk.Button(self.footer, text="Start Game", width=15, command=self.start_game)
+            self.start_btn.pack(side="left", padx=10, after=self.ready_btn)
+        elif not self.master.is_host and self.start_btn is not None:
+            self.start_btn.destroy()
+            self.start_btn = None
 
     def toggle_ready(self):
         self.master.net.send({"type": "ready", "status": not self.master.is_ready})
@@ -787,7 +800,7 @@ class GameOverFrame(tk.Frame):
 
     def return_to_lobby(self):
         self.master.phase = "lobby"
-        self.master.show_lobby()
+        self.master.show_room_lobby()
 
 
 if __name__ == "__main__":

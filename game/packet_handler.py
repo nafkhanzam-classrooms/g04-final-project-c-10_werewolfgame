@@ -632,7 +632,7 @@ class PacketHandler:
 
         with room.lock:
             room.started        = False
-            room.game.phase     = Phase.ENDED
+            room.game.phase     = Phase.LOBBY   # <-- was Phase.ENDED, change to LOBBY
             room.game.hunter_pending = None
         self._cancel_timer(room)
 
@@ -641,3 +641,5 @@ class PacketHandler:
             p.ready = False
             p.alive = True
             p.role  = Role.VILLAGER
+
+        self._broadcast_players(room)  # <-- send fresh players_list so client can update RoomLobbyFrame
