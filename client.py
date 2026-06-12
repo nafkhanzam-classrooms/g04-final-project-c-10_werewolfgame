@@ -223,6 +223,7 @@ class WerewolfClient(tk.Tk):
             snap_players     = packet.get("players", [])
             if snap_players:
                 self.players = snap_players
+            self.update_theme(self.phase)
             if hasattr(self.current_frame, "update_phase"):
                 self.current_frame.update_phase(
                     {"phase": self.phase, "duration": self.timer_total})
