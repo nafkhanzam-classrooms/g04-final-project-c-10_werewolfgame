@@ -53,6 +53,7 @@ class PacketHandler:
             "protect":     self.on_protect,
             "check":       self.on_check,
             "vote":        self.on_vote,
+            "cancel_action": self.on_cancel_action,
             "hunter_shot": self.on_hunter_shot,
             "ping":        self.on_ping,
             "players":     self.on_players,
@@ -415,6 +416,45 @@ class PacketHandler:
         self.broadcast(room, {"type": "system", "msg": f"{player.username} has voted."})
         self.broadcast(room, {"type": "vote_update",
                                "votes_in": votes_in, "total": alive_count})
+        
+    def on_cancel_action(self, player, packet):
+        if not player.room:
+            return
+        room = self.server.room_manager.get_room(player.room)
+        if not room:
+            return
+        phase = room.game.phase
+        role  = player.role
+        with room.lock:
+            if phase == Phase.NIGHT:
+                if role == Role.WEREWOLF:
+                    removed = room.game.night_kills.pop(player.username, None)
+                    if removed:
+                        self.broadcast_wolves(room, {
+                            "type": "system",
+                            "msg": f"{player.username} cancelled their kill target."
+                        })
+                elif role == Role.DOCTOR:
+                    if room.game.night_protect is not None:
+                        room.game.night_protect = None
+                        self.send(player, {
+                            "type": "system",
+                            "msg": "You cancelled your protection."
+                        })
+            elif phase == Phase.VOTING:
+                removed = room.game.votes.pop(player.username, None)
+                if removed:
+                    alive_count = len(room.game.get_alive_players())
+                    votes_in    = len(room.game.votes)
+                    self.broadcast(room, {
+                        "type": "system",
+                        "msg": f"{player.username} changed their mind."
+                    })
+                    self.broadcast(room, {
+                        "type": "vote_update",
+                        "votes_in": votes_in,
+                        "total": alive_count
+                    })
 
     # ------------------------------------------------------------------ #
     #  Hunter                                                              #

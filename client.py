@@ -571,6 +571,8 @@ class GameFrame(tk.Frame):
         super().__init__(master, bg=THEMES["lobby"]["bg"])
         self.master          = master
         self._hunter_dialog  = None
+        self._selected_target = None   # username of currently "pressed" button
+        self._action_buttons  = {}     # username -> tk.Button
 
         # ── Top bar ──
         self.top_bar = tk.Frame(self, bg="#16213e", height=100)
@@ -765,9 +767,19 @@ class GameFrame(tk.Frame):
         self._rebuild_action_buttons(players)
 
     def _rebuild_action_buttons(self, players):
-        """Rebuild action buttons — only called when phase changes or player list arrives."""
+        """
+        Rebuild action buttons for night/voting phase.
+        Uses tk.Button (not ttk) for full visual control over relief + bg.
+
+        Toggle logic:
+          - Click unpressed  → select (send action, look sunken/cyan)
+          - Click pressed    → cancel (look raised/dark, no new packet)
+          - Click different  → deselect old, select new
+        """
         for w in self.action_frame.winfo_children():
             w.destroy()
+        self._action_buttons  = {}
+        self._selected_target = None
 
         phase = self.master.phase
         role  = self.master.role
@@ -779,29 +791,97 @@ class GameFrame(tk.Frame):
                         and p["username"] != self.master.username]
 
         for p in alive_others:
-            name = p["username"]
+            name    = p["username"]
             btn_row = tk.Frame(self.action_frame, bg=self.master["bg"])
-            btn_row.pack(fill="x", pady=1)
+            btn_row.pack(fill="x", pady=2)
+
             tk.Label(btn_row, text=name, font=self.master.font_small,
-                     bg=self.master["bg"], fg="#e1e1e1", width=14,
-                     anchor="w").pack(side="left")
+                     bg=self.master["bg"], fg="#e1e1e1",
+                     width=14, anchor="w").pack(side="left")
 
             if phase == "voting":
-                ttk.Button(btn_row, text="VOTE", width=6,
-                           command=lambda u=name: self.vote(u)).pack(side="right")
+                label = "VOTE"
+            elif phase == "night":
+                if role == "Werewolf":   label = "KILL"
+                elif role == "Seer":     label = "CHECK"
+                elif role == "Doctor":   label = "HEAL"
+                else:                    label = None
+            else:
+                label = None
+
+            if label is None:
+                continue
+
+            # Seer after first check — permanently disabled
+            if role == "Seer" and self.master.seer_used:
+                tk.Button(btn_row, text=label, width=7,
+                          font=self.master.font_small,
+                          bg="#333333", fg="#666666",
+                          relief="flat", state="disabled",
+                          borderwidth=2).pack(side="right")
+                continue
+
+            btn = tk.Button(
+                btn_row, text=label, width=7,
+                font=self.master.font_small,
+                bg="#2a2a2a", fg="#e1e1e1",
+                activebackground="#444444", activeforeground="#ffffff",
+                relief="raised", borderwidth=2,
+                cursor="hand2",
+            )
+            btn.pack(side="right")
+            self._action_buttons[name] = btn
+            btn.config(command=lambda u=name, b=btn: self._toggle_action(u, b))
+
+    def _toggle_action(self, target, btn):
+        """Press/cancel/switch action buttons."""
+        phase = self.master.phase
+        role  = self.master.role
+
+        if self._selected_target == target:
+            # Same button → cancel
+            self._set_btn_pressed(btn, False)
+            self._selected_target = None
+            # Tell the server to clear our pending action
+            self.master.net.send({"type": "cancel_action"})
+            self.add_system_msg(f"Cancelled selection: {target}")
+        else:
+            # Unpress previous
+            if self._selected_target in self._action_buttons:
+                try:
+                    self._set_btn_pressed(self._action_buttons[self._selected_target], False)
+                except tk.TclError:
+                    pass
+            # Press new
+            self._set_btn_pressed(btn, True)
+            self._selected_target = target
+
+            # Send packet
+            if phase == "voting":
+                self.vote(target)
             elif phase == "night":
                 if role == "Werewolf":
-                    ttk.Button(btn_row, text="KILL", width=6,
-                               command=lambda u=name: self.kill(u)).pack(side="right")
+                    self.kill(target)
                 elif role == "Seer":
-                    btn = ttk.Button(btn_row, text="CHECK", width=6,
-                                     command=lambda u=name: self.check(u))
-                    btn.pack(side="right")
-                    if self.master.seer_used:
-                        btn.state(["disabled"])
+                    self.check(target)
+                    # Seer is one-shot — disable all check buttons
+                    for b in self._action_buttons.values():
+                        try:
+                            b.config(state="disabled", bg="#333333",
+                                     fg="#666666", relief="flat")
+                        except tk.TclError:
+                            pass
                 elif role == "Doctor":
-                    ttk.Button(btn_row, text="HEAL", width=6,
-                               command=lambda u=name: self.protect(u)).pack(side="right")
+                    self.protect(target)
+
+    def _set_btn_pressed(self, btn, pressed: bool):
+        """Toggle visual pressed state on a tk.Button."""
+        if pressed:
+            btn.config(relief="sunken", bg="#00d2ff",
+                       fg="#000000", activebackground="#00b8d9")
+        else:
+            btn.config(relief="raised", bg="#2a2a2a",
+                       fg="#e1e1e1", activebackground="#444444")
 
     # ── Timer ──────────────────────────────────────────────────────────────────
     def update_timer(self, seconds):
@@ -828,6 +908,8 @@ class GameFrame(tk.Frame):
     def update_phase(self, packet):
         phase = packet["phase"]
         self.phase_label.config(text=phase.upper() + " PHASE")
+        self._selected_target = None   # clear toggle state on phase change
+        self._action_buttons  = {}
         if packet.get("msg"):
             self.add_system_msg(packet["msg"])
         if phase == "voting":

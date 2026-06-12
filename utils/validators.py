@@ -40,6 +40,7 @@ PACKET_SCHEMA = {
     "check":       {"target":   (str, 1, 32)},
     "vote":        {"target":   (str, 1, 32)},
     "hunter_shot": {"target":   (str, 1, 32)},
+    "cancel_action": {},
     "ping":        {"t":        ((int, float), None, None)},
     "players":     {},
 }
