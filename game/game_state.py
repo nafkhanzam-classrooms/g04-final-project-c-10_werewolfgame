@@ -55,9 +55,9 @@ class GameState:
 
         if n <= 6:
             num_wolves, specials = 1, [Role.SEER]
-        elif n <= 9:
+        elif n <= 7:
             num_wolves, specials = 2, [Role.SEER, Role.DOCTOR]
-        elif n <= 12:
+        elif n <= 8:
             num_wolves, specials = 2, [Role.SEER, Role.DOCTOR, Role.HUNTER]
         else:
             num_wolves, specials = 3, [Role.SEER, Role.DOCTOR, Role.HUNTER]
