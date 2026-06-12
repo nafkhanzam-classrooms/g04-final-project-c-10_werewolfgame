@@ -4,6 +4,7 @@ import threading
 from game.game_state import Phase, Role
 from game.room_manager import MIN_PLAYERS
 from utils.serializer import encode
+from utils.validators import validate_packet
 from server.database import (
     register_user, login_user, is_online,
     set_connected, get_session, clear_session
@@ -28,30 +29,38 @@ class PacketHandler:
     # ------------------------------------------------------------------ #
 
     def handle(self, player, packet):
-        ptype = packet.get("type")
+        # Schema validation runs before dispatch. Invalid packets never
+        # reach any on_X handler.
+        ok, err = validate_packet(packet)
+        if not ok:
+            who = player.username or str(player.addr)
+            self.server.log(f"[INVALID] {who}: {err}")
+            self.send(player, {"type": "error", "msg": err})
+            return
+
+        ptype = packet["type"]   # safe: validator guarantees this is a str
         handlers = {
-            "register": self.on_register,
-            "login":    self.on_login,
-            "create":   self.on_create,
-            "join":     self.on_join,
-            "leave":    self.on_leave,
-            "rooms":    self.on_rooms,
-            "start":    self.on_start,
-            "ready":    self.on_ready,
-            "chat":     self.on_chat,
-            "kill":     self.on_kill,
-            "protect":  self.on_protect,
-            "check":    self.on_check,
-            "vote":     self.on_vote,
+            "register":    self.on_register,
+            "login":       self.on_login,
+            "create":      self.on_create,
+            "join":        self.on_join,
+            "leave":       self.on_leave,
+            "rooms":       self.on_rooms,
+            "start":       self.on_start,
+            "ready":       self.on_ready,
+            "chat":        self.on_chat,
+            "kill":        self.on_kill,
+            "protect":     self.on_protect,
+            "check":       self.on_check,
+            "vote":        self.on_vote,
             "hunter_shot": self.on_hunter_shot,
-            "ping":     self.on_ping,
-            "players":  self.on_players,
+            "ping":        self.on_ping,
+            "players":     self.on_players,
         }
         fn = handlers.get(ptype)
         if fn:
             fn(player, packet)
-        else:
-            self.send(player, {"type": "error", "msg": f"Unknown packet type: {ptype}"})
+        # No `else` needed — validator already rejected unknown types.
 
     # ------------------------------------------------------------------ #
     #  Send helpers                                                        #

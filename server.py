@@ -16,6 +16,7 @@ PORT = 5000
 
 PING_WATCHDOG_INTERVAL = 5    # seconds between watchdog checks
 PING_TIMEOUT           = 35   # warn if no ping received for this many seconds
+MAX_LINE_BYTES         = 64 * 1024   # cap a single packet line at 64KB
 
 
 class Server:
@@ -72,22 +73,58 @@ class Server:
                 if not data:
                     break
                 buffer += data.decode("utf-8", errors="ignore")
+
+                # Process all complete lines in the buffer first.
                 while "\n" in buffer:
                     line, buffer = buffer.split("\n", 1)
                     line = line.strip()
                     if not line:
                         continue
+
+                    # Reject oversized single lines.
+                    if len(line) > MAX_LINE_BYTES:
+                        self.log(f"[INVALID] {addr} oversized line ({len(line)}B), dropped")
+                        p = self.active_conns.get(addr)
+                        if p:
+                            self.packet_handler.send(
+                                p, {"type": "error", "msg": "Packet too large"}
+                            )
+                        continue
+
                     try:
                         packet = decode(line)
-                        player = self.active_conns.get(addr)
-                        if player:
-                            self.packet_handler.handle(player, packet)
                     except json.JSONDecodeError:
-                        player = self.active_conns.get(addr)
-                        if player:
+                        self.log(f"[INVALID] {addr} malformed JSON: {line[:120]!r}")
+                        p = self.active_conns.get(addr)
+                        if p:
                             self.packet_handler.send(
-                                player, {"type": "error", "msg": "Malformed packet"}
+                                p, {"type": "error", "msg": "Malformed packet"}
                             )
+                        continue
+
+                    p = self.active_conns.get(addr)
+                    if not p:
+                        continue
+                    # Defense-in-depth: never let a handler exception kill this thread.
+                    try:
+                        self.packet_handler.handle(p, packet)
+                    except Exception as e:
+                        self.log(f"[HANDLER_ERROR] {addr} {packet.get('type','?')}: {e}")
+                        self.packet_handler.send(
+                            p, {"type": "error", "msg": "Internal handler error"}
+                        )
+
+                # After draining complete lines, an oversized incomplete buffer
+                # means the client is flooding without sending a newline.
+                # Drop the buffer (lenient) and notify them.
+                if len(buffer) > MAX_LINE_BYTES:
+                    self.log(f"[INVALID] {addr} oversized buffer ({len(buffer)}B), dropped")
+                    p = self.active_conns.get(addr)
+                    if p:
+                        self.packet_handler.send(
+                            p, {"type": "error", "msg": "Payload too large; buffer cleared"}
+                        )
+                    buffer = ""
         except Exception:
             pass
         finally:

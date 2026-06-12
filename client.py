@@ -8,6 +8,7 @@ import time
 
 HOST = "127.0.0.1"
 PORT = 5000
+MAX_LINE_BYTES = 64 * 1024   # cap a single packet line at 64KB
 
 THEMES = {
     "lobby":  {"bg": "#1a1a2e", "panel": "#16213e", "accent": "#00d2ff", "text": "#e1e1e1"},
@@ -58,14 +59,25 @@ class NetClient:
                     self.connected = False
                     break
                 buffer += data.decode("utf-8", errors="ignore")
+
                 while "\n" in buffer:
                     line, buffer = buffer.split("\n", 1)
                     line = line.strip()
-                    if line:
-                        try:
-                            self.packet_queue.put(json.loads(line))
-                        except Exception:
-                            pass
+                    if not line:
+                        continue
+                    if len(line) > MAX_LINE_BYTES:
+                        print(f"[CLIENT] Oversized line ({len(line)}B), dropped")
+                        continue
+                    try:
+                        self.packet_queue.put(json.loads(line))
+                    except Exception:
+                        # Malformed JSON from server — just skip it.
+                        pass
+
+                # Drop an oversized incomplete buffer.
+                if len(buffer) > MAX_LINE_BYTES:
+                    print(f"[CLIENT] Oversized buffer ({len(buffer)}B), dropped")
+                    buffer = ""
             except Exception:
                 self.connected = False
                 break
@@ -170,7 +182,7 @@ class WerewolfClient(tk.Tk):
         self.update_theme(self.phase)
 
     # ------------------------------------------------------------------ #
-    #  Packet processing                                                   #
+    #  Packet processing                                                  #
     # ------------------------------------------------------------------ #
 
     def _process_packets(self):
