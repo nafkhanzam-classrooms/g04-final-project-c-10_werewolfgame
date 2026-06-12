@@ -257,6 +257,11 @@ class WerewolfClient(tk.Tk):
                     self.show_game_screen()
             self.update_theme(self.phase)
             _play_sound("phase")
+            # Close hunter dialog if still open (timer expired server-side)
+            if hasattr(self.current_frame, "_hunter_dialog"):
+                if self.current_frame._hunter_dialog and \
+                        self.current_frame._hunter_dialog.winfo_exists():
+                    self.current_frame._hunter_dialog.destroy()
             if hasattr(self.current_frame, "update_phase"):
                 self.current_frame.update_phase(packet)
 
