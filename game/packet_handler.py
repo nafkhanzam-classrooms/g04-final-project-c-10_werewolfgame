@@ -251,6 +251,8 @@ class PacketHandler:
 
     def on_leave(self, player, packet):
         if not player.room:
+            if player.username:
+                clear_session(player.username)
             return
         rname = player.room
         room  = self.server.room_manager.get_room(rname)
