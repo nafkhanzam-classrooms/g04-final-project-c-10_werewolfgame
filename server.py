@@ -16,6 +16,7 @@ PORT = 5000
 
 PING_WATCHDOG_INTERVAL = 5    # seconds between watchdog checks
 PING_TIMEOUT           = 35   # warn if no ping received for this many seconds
+OFFLINE_TIMEOUT        = 300  # purge player data after 5 minutes of offline
 MAX_LINE_BYTES         = 64 * 1024   # cap a single packet line at 64KB
 
 
@@ -169,10 +170,14 @@ class Server:
             pass
 
     def _watchdog_loop(self):
-        """Log a warning for any connected player who hasn't pinged in PING_TIMEOUT seconds."""
+        """Log a warning for any connected player who hasn't pinged in PING_TIMEOUT seconds.
+        Also purge players who have been offline for more than OFFLINE_TIMEOUT.
+        """
         while True:
             time.sleep(PING_WATCHDOG_INTERVAL)
             now = time.time()
+
+            # 1. Check active connections (logged-in and guest)
             for player in list(self.active_conns.values()):
                 if not player.connected or not player.username:
                     continue
@@ -181,6 +186,24 @@ class Server:
                         f"[WARN] No ping from {player.username} for "
                         f"{int(now - player.last_ping)}s"
                     )
+
+            # 2. Purge offline players from rooms (Reconnect Timeout)
+            for room in list(self.room_manager.rooms.values()):
+                to_purge = []
+
+                with room.lock:
+                    for p in room.game.players.values():
+                        if not p.connected and p.last_ping:
+                            if (now - p.last_ping) > OFFLINE_TIMEOUT:
+                                to_purge.append(p)
+
+                for p in to_purge:
+                    self.log(
+                        f"[PURGE] Removing stale offline player "
+                        f"{p.username} from {room.name}"
+                    )
+                    self.room_manager.leave_room(p)
+                    self.packet_handler._broadcast_players(room)
 
 
 if __name__ == "__main__":
