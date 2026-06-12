@@ -99,6 +99,8 @@ class WerewolfClient(tk.Tk):
         self.withdraw()
         self.title("Werewolf: Azrael of the Night")
         self.geometry("1000x750")
+        self.minsize(800, 600)
+        self.resizable(True, True)
         self.configure(bg="#1a1a2e")
 
         self.packet_queue = queue.Queue()
@@ -339,12 +341,22 @@ class AuthFrame(tk.Frame):
         super().__init__(master, bg=THEMES["lobby"]["bg"])
         self.master = master
 
-        tk.Label(self, text="WEREWOLF", font=master.font_title,
-                 bg=master["bg"], fg="#00d2ff").pack(pady=(80, 5))
-        tk.Label(self, text="Azrael of the Night", font=master.font_main,
-                 bg=master["bg"], fg="#e1e1e1").pack(pady=(0, 40))
+        # Grid-based centering: spacer rows absorb extra space so content
+        # stays vertically centered regardless of window height.
+        self.rowconfigure(0, weight=1)
+        self.rowconfigure(1, weight=0)
+        self.rowconfigure(2, weight=1)
+        self.columnconfigure(0, weight=1)
 
-        form = tk.Frame(self, bg=master["bg"])
+        center = tk.Frame(self, bg=master["bg"])
+        center.grid(row=1, column=0)
+
+        tk.Label(center, text="WEREWOLF", font=master.font_title,
+                 bg=master["bg"], fg="#00d2ff").pack(pady=(0, 5))
+        tk.Label(center, text="Azrael of the Night", font=master.font_main,
+                 bg=master["bg"], fg="#e1e1e1").pack(pady=(0, 30))
+
+        form = tk.Frame(center, bg=master["bg"])
         form.pack()
 
         tk.Label(form, text="Username:", font=master.font_bold,
@@ -358,7 +370,7 @@ class AuthFrame(tk.Frame):
         self.pass_entry.grid(row=1, column=1, pady=8)
         self.pass_entry.bind("<Return>", lambda e: self.do_login())
 
-        btn_frame = tk.Frame(self, bg=master["bg"])
+        btn_frame = tk.Frame(center, bg=master["bg"])
         btn_frame.pack(pady=30)
         ttk.Button(btn_frame, text="Login",    width=14, command=self.do_login).pack(side="left", padx=10)
         ttk.Button(btn_frame, text="Register", width=14, command=self.do_register).pack(side="left", padx=10)
@@ -391,17 +403,25 @@ class LobbyFrame(tk.Frame):
         super().__init__(master, bg=THEMES["lobby"]["bg"])
         self.master = master
 
-        tk.Label(self, text=f"Welcome, {master.username}", font=master.font_header,
-                 bg=master["bg"], fg="#00d2ff").pack(pady=(100, 30))
+        self.rowconfigure(0, weight=1)
+        self.rowconfigure(1, weight=0)
+        self.rowconfigure(2, weight=1)
+        self.columnconfigure(0, weight=1)
 
-        tk.Label(self, text="Enter Room Code to Join:", font=master.font_main,
+        center = tk.Frame(self, bg=master["bg"])
+        center.grid(row=1, column=0)
+
+        tk.Label(center, text=f"Welcome, {master.username}", font=master.font_header,
+                 bg=master["bg"], fg="#00d2ff").pack(pady=(0, 30))
+
+        tk.Label(center, text="Enter Room Code to Join:", font=master.font_main,
                  bg=master["bg"], fg="#e1e1e1").pack()
-        self.room_entry = ttk.Entry(self, font=master.font_header, width=15, justify="center")
+        self.room_entry = ttk.Entry(center, font=master.font_header, width=15, justify="center")
         self.room_entry.pack(pady=10)
 
-        btn_frame = tk.Frame(self, bg=master["bg"])
+        btn_frame = tk.Frame(center, bg=master["bg"])
         btn_frame.pack(pady=30)
-        ttk.Button(btn_frame, text="Join Room",      width=18, command=self.join_room).pack(side="left", padx=15)
+        ttk.Button(btn_frame, text="Join Room",       width=18, command=self.join_room).pack(side="left", padx=15)
         ttk.Button(btn_frame, text="Create New Room", width=18, command=self.create_room).pack(side="left", padx=15)
 
     def join_room(self):
@@ -501,10 +521,9 @@ class GameFrame(tk.Frame):
         self.master = master
         self._hunter_dialog = None
 
-        # ---- Top bar ----
-        self.top_bar = tk.Frame(self, bg="#16213e", height=100)
+        # ---- Top bar ---- (no fixed height, let content determine size)
+        self.top_bar = tk.Frame(self, bg="#16213e")
         self.top_bar.pack(fill="x")
-        self.top_bar.pack_propagate(False)
 
         self.info_top = tk.Frame(self.top_bar, bg="#16213e")
         self.info_top.pack(fill="x", padx=30, pady=(15, 0))
@@ -558,9 +577,9 @@ class GameFrame(tk.Frame):
         ttk.Button(input_frame, text="Send", width=10, command=self.send_chat).pack(side="right")
 
         # Right panel — player list + vote tally
-        self.right_frame = tk.Frame(self.content, bg=master["bg"], width=350, padx=20, pady=20)
+        # Use fill="y" without a fixed width so it shrinks/grows with the window.
+        self.right_frame = tk.Frame(self.content, bg=master["bg"], padx=20, pady=20)
         self.right_frame.pack(side="right", fill="y")
-        self.right_frame.pack_propagate(False)
 
         tk.Label(self.right_frame, text="PLAYER STATUS", font=master.font_bold,
                  bg=master["bg"], fg="#e1e1e1").pack(pady=(0, 10))
