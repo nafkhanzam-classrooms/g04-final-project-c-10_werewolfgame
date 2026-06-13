@@ -1,12 +1,23 @@
 import sqlite3
 import hashlib
 import os
+from contextlib import contextmanager
 
 DB_PATH = os.path.join(os.path.dirname(__file__), "..", "werewolf.db")
 
 
+@contextmanager
 def _connect():
-    return sqlite3.connect(DB_PATH, check_same_thread=False)
+    con = sqlite3.connect(DB_PATH, check_same_thread=False, timeout=10)
+    try:
+        yield con
+    except Exception:
+        con.rollback()
+        raise
+    else:
+        con.commit()
+    finally:
+        con.close()
 
 
 def init_db():
