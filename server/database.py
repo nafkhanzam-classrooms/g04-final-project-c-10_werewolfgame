@@ -22,6 +22,9 @@ def _connect():
 
 def init_db():
     with _connect() as con:
+        con.execute("PRAGMA journal_mode=WAL")
+        con.execute("PRAGMA synchronous=NORMAL")
+        con.execute("PRAGMA busy_timeout=5000")
         con.executescript("""
             CREATE TABLE IF NOT EXISTS users (
                 username   TEXT PRIMARY KEY,
