@@ -16,14 +16,14 @@ MAX_LINE_BYTES = 64 * 1024
 ROLE_ICONS = {
     "Werewolf": "[W]",
     "Seer":     "[S]",
-    "Doctor":   "[D]",
+    "Guard":   "[D]",
     "Hunter":   "[H]",
     "Villager": "[V]",
 }
 ROLE_COLORS = {
     "Werewolf": "#ff4d4d",
     "Seer":     "#c084fc",
-    "Doctor":   "#4ade80",
+    "Guard":   "#4ade80",
     "Hunter":   "#fb923c",
     "Villager": "#93c5fd",
 }
@@ -809,7 +809,7 @@ class GameFrame(tk.Frame):
             elif phase == "night":
                 if role == "Werewolf":   label = "KILL"
                 elif role == "Seer":     label = "CHECK"
-                elif role == "Doctor":   label = "HEAL"
+                elif role == "Guard":   label = "PROTECT"
                 else:                    label = None
             else:
                 label = None
@@ -876,7 +876,7 @@ class GameFrame(tk.Frame):
                                      fg="#666666", relief="flat")
                         except tk.TclError:
                             pass
-                elif role == "Doctor":
+                elif role == "Guard":
                     self.protect(target)
 
     def _set_btn_pressed(self, btn, pressed: bool):

@@ -14,7 +14,7 @@ class Role(Enum):
     VILLAGER = "Villager"
     WEREWOLF = "Werewolf"
     SEER     = "Seer"
-    DOCTOR   = "Doctor"
+    GUARD   = "Guard"
     HUNTER   = "Hunter"
 
 
@@ -25,7 +25,7 @@ class GameState:
         self.phase       = Phase.LOBBY
         self.votes       = {}   # voter -> target
         self.night_kills = {}   # killer -> target  (werewolf votes)
-        self.night_protect = None   # doctor's chosen target
+        self.night_protect = None   # guard's chosen target
         self.seer_check  = {}   # seer -> target
         self.eliminated  = []
         self.winner      = None
@@ -44,23 +44,23 @@ class GameState:
     def assign_roles(self):
         """
         PRD role scaling:
-          4–6  players: 1 wolf, Seer
-          7–9  players: 2 wolves, Seer, Doctor
-          10–12: 2 wolves, Seer, Doctor, Hunter
-          13–15: 3 wolves, Seer, Doctor, Hunter
+          4–5  players: 1 wolf, Seer
+          6-7 players: 2 wolves, Seer, Guard
+          8–10: 2 wolves, Seer, Guard, Hunter
+          13–15: 3 wolves, Seer, Guard, Hunter
         """
         usernames = list(self.players.keys())
         random.shuffle(usernames)
         n = len(usernames)
 
-        if n <= 6:
+        if n <= 5:
             num_wolves, specials = 1, [Role.SEER]
         elif n <= 7:
-            num_wolves, specials = 2, [Role.SEER, Role.DOCTOR]
-        elif n <= 8:
-            num_wolves, specials = 2, [Role.SEER, Role.DOCTOR, Role.HUNTER]
+            num_wolves, specials = 2, [Role.SEER, Role.GUARD]
+        elif n <= 10:
+            num_wolves, specials = 2, [Role.SEER, Role.GUARD, Role.HUNTER]
         else:
-            num_wolves, specials = 3, [Role.SEER, Role.DOCTOR, Role.HUNTER]
+            num_wolves, specials = 3, [Role.SEER, Role.GUARD, Role.HUNTER]
 
         idx = 0
         for i in range(num_wolves):

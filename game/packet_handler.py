@@ -360,7 +360,7 @@ class PacketHandler:
                                       "msg": f"{player.username} targeted {target}"})
 
     def on_protect(self, player, packet):
-        if not player.room or player.role != Role.DOCTOR:
+        if not player.room or player.role != Role.GUARD:
             return
         room = self.server.room_manager.get_room(player.room)
         if room.game.phase != Phase.NIGHT:
@@ -434,7 +434,7 @@ class PacketHandler:
                             "type": "system",
                             "msg": f"{player.username} cancelled their kill target."
                         })
-                elif role == Role.DOCTOR:
+                elif role == Role.GUARD:
                     if room.game.night_protect is not None:
                         room.game.night_protect = None
                         self.send(player, {
