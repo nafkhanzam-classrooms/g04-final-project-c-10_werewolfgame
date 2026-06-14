@@ -231,7 +231,7 @@ Server stabil hingga 100 concurrent client dengan success rate 100%. Pada 500 cl
 ## Screenshot Hasil
 
 ### 1. Lobby Room
-> ![alt text](image.png)
+> ![alt text](image/image.png)
 *Menampilkan daftar pemain, status Ready/Unready*
 
 ### 2. Night Phase (Werewolf View)
