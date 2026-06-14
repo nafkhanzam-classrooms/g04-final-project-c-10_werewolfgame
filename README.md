@@ -251,9 +251,10 @@ Server stabil hingga 100 concurrent client dengan success rate 100%. Pada 500 cl
 *Proses pemungutan suara untuk menyingkirkan tersangka.*
 
 ### 6. Dead Chat Channel
-> 
+> ![alt text](image/deadchat.png)
 *Pemain yang sudah mati tetap bisa memantau game*
 
 ### 7. Game Over (Winner Reveal)
-> 
+> ![alt text](image/werewolf.png)
+> ![alt text](image/gameover.png)
 *Pengumuman pemenang (Villagers/Werewolf Win)*
