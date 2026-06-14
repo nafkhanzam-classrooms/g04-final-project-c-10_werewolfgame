@@ -47,7 +47,7 @@ class GameState:
           4–5  players: 1 wolf, Seer
           6-7 players: 2 wolves, Seer, Guard
           8–10: 2 wolves, Seer, Guard, Hunter
-          13–15: 3 wolves, Seer, Guard, Hunter
+          11–15: 3 wolves, Seer, Guard, Hunter
         """
         usernames = list(self.players.keys())
         random.shuffle(usernames)

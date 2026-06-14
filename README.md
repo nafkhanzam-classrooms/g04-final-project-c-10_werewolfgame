@@ -80,7 +80,7 @@ Gak perlu install library tambahan, semua pakai standard library Python. Client 
 2. **Lobby:** buat room baru atau join room dengan kode 6 karakter
 3. **Room Lobby:** tunggu pemain lain, semua harus ready (minimal 4 pemain)
 4. **Host klik Start:** role dibagikan secara acak dan rahasia
-5. **Malam (45s):** Werewolf pilih korban, Seer investigasi, Doctor lindungi
+5. **Malam (45s):** Werewolf pilih korban, Seer investigasi, Guard lindungi
 6. **Siang (90s):** diskusi terbuka, cari siapa serigalanya
 7. **Voting (45s):** semua vote siapa yang dieliminasi
 8. **Ulangi** sampai salah satu tim menang
@@ -89,10 +89,10 @@ Gak perlu install library tambahan, semua pakai standard library Python. Client 
 
 | Pemain | Werewolf | Role Spesial |
 |--------|----------|--------------|
-| 4-6 | 1 | Seer |
-| 7-9 | 2 | Seer, Doctor |
-| 10-12 | 2 | Seer, Doctor, Hunter |
-| 13-15 | 3 | Seer, Doctor, Hunter |
+| 4-5 | 1 | Seer |
+| 6-7 | 2 | Seer, Guard |
+| 8-10 | 2 | Seer, Guard, Hunter |
+| 11-15 | 3 | Seer, Guard, Hunter |
 
 ### Desain Protokol
 
@@ -124,7 +124,7 @@ while "\n" in buffer:
 | `start` | - | Host mulai game |
 | `chat` | `msg` | Kirim pesan |
 | `kill` | `target` | Werewolf bunuh target |
-| `protect` | `target` | Doctor lindungi target |
+| `protect` | `target` | Guard lindungi target |
 | `check` | `target` | Seer cek identitas |
 | `vote` | `target` | Vote eliminasi |
 | `cancel_action` | - | Batalkan aksi malam/vote |
