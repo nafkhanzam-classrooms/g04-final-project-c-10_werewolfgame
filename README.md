@@ -19,8 +19,6 @@ Link ditaruh di bawah ini
 
 Werewolf: Azrael of the Night adalah game multiplayer berbasis jaringan yang mengimplementasikan permainan Werewolf (Mafia). Dibangun dari scratch menggunakan **TCP socket Python** tanpa framework backend apapun.
 
-![alt text](<Client Side (1).png>)
-
 Setiap pemain mendapat role rahasia dan bersaing dalam dua kubu: **Werewolf** yang berusaha mengeliminasi pemain lain tanpa ketahuan, dan **Villager** yang berusaha mengidentifikasi dan mengeliminasi semua Werewolf melalui diskusi dan voting. Seluruh logika permainan dijalankan secara terpusat di server sehingga client tidak bisa memanipulasi state secara langsung.
 
 ### Arsitektur Sistem
@@ -76,7 +74,7 @@ Gak perlu install library tambahan, semua pakai standard library Python. Client 
 
 ### Flow Game
 
-> [TARUH DIAGRAM FLOW GAME DI SINI]
+![alt text](<Client Side (1).png>)
 
 1. **Register / Login:** buat akun atau login dengan akun yang sudah ada
 2. **Lobby:** buat room baru atau join room dengan kode 6 karakter
