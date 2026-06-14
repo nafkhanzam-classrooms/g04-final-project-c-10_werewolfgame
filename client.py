@@ -14,7 +14,7 @@ MAX_LINE_BYTES = 64 * 1024
 ROLE_ICONS = {
     "Werewolf": "[W]",
     "Seer":     "[S]",
-    "Guard":   "[D]",
+    "Guard":   "[G]",
     "Hunter":   "[H]",
     "Villager": "[V]",
 }
