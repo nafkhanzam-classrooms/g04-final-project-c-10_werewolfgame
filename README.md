@@ -19,11 +19,13 @@ Link ditaruh di bawah ini
 
 Werewolf: Azrael of the Night adalah game multiplayer berbasis jaringan yang mengimplementasikan permainan Werewolf (Mafia). Dibangun dari scratch menggunakan **TCP socket Python** tanpa framework backend apapun.
 
+![alt text](<Client Side (1).png>)
+
 Setiap pemain mendapat role rahasia dan bersaing dalam dua kubu: **Werewolf** yang berusaha mengeliminasi pemain lain tanpa ketahuan, dan **Villager** yang berusaha mengidentifikasi dan mengeliminasi semua Werewolf melalui diskusi dan voting. Seluruh logika permainan dijalankan secara terpusat di server sehingga client tidak bisa memanipulasi state secara langsung.
 
 ### Arsitektur Sistem
 
-> [TARUH DIAGRAM ARSITEKTUR DI SINI]
+![alt text](<Client Side.png>)
 
 ```
 Client (Tkinter GUI)
@@ -193,7 +195,7 @@ if not ok:
 
 ### Deployment
 
-Server di-deploy di **DigitalOcean Droplet** (Singapore, Ubuntu 24.04) sebagai systemd service dan auto-restart kalau crash.
+Server di-deploy di **DigitalOcean Droplet** (Ubuntu 24.04) sebagai systemd service dan auto-restart kalau crash.
 
 ```bash
 # Cek log server dari mana saja
@@ -209,7 +211,7 @@ curl http://143.198.217.44:5001/logs
 python3 tools/load_test.py --clients 100
 ```
 
-Hasil load test terhadap server DigitalOcean Droplet (1 GB RAM, Singapore):
+Hasil load test terhadap server DigitalOcean Droplet:
 
 | Clients | Success | Avg Login Latency | Avg Ping RTT |
 |---------|---------|-------------------|--------------|
