@@ -483,7 +483,10 @@ class PacketHandler:
         if winner:
             self._announce_winner(room, winner)
         else:
-            self._start_next_night(room)
+            if room.game.phase == Phase.NIGHT:
+                self._advance_to_day(room, player.username)
+            else:
+                self._start_next_night(room)
 
     # ------------------------------------------------------------------ #
     #  Ping / latency                                                      #
