@@ -19,6 +19,8 @@ Link ditaruh di bawah ini
 
 Werewolf: Azrael of the Night adalah game multiplayer berbasis jaringan yang mengimplementasikan permainan Werewolf (Mafia). Dibangun dari scratch menggunakan **TCP socket Python** tanpa framework backend apapun.
 
+Setiap pemain mendapat role rahasia dan bersaing dalam dua kubu: **Werewolf** yang berusaha mengeliminasi pemain lain tanpa ketahuan, dan **Villager** yang berusaha mengidentifikasi dan mengeliminasi semua Werewolf melalui diskusi dan voting. Seluruh logika permainan dijalankan secara terpusat di server sehingga client tidak bisa memanipulasi state secara langsung.
+
 ### Arsitektur Sistem
 
 > [TARUH DIAGRAM ARSITEKTUR DI SINI]
@@ -170,7 +172,7 @@ Room.lock               # proteksi state game per room
 
 ### Fitur Utama
 
-**Reconnect Handling:** kalau koneksi putus di tengah game, slot pemain tetap tersimpan. Login lagi dan langsung balik ke game tanpa kehilangan role.
+**Reconnect Handling:** kalau koneksi putus di tengah game, slot pemain tetap tersimpan. Server menyimpan session di SQLite dengan room_code yang masih ada. Login lagi dan langsung balik ke game tanpa kehilangan role, server mengirimkan `state_snapshot` berisi phase saat ini, sisa waktu, dan daftar pemain.
 
 **Anti-Invalid Packet:** server validasi semua packet sebelum diproses pakai schema validator. Packet aneh langsung ditolak dengan error response, koneksi tetap hidup.
 
@@ -184,6 +186,8 @@ if not ok:
 **Cancel Action:** pemain bisa batalkan pilihan malam atau vote dengan klik tombol yang sama lagi. Server langsung hapus aksi yang sudah tercatat.
 
 **Phase Timer:** timer tiap fase jalan di server, bukan di client. Timer bar di UI berubah warna, hijau ke kuning ke merah sesuai sisa waktu.
+
+**Server Logging:** setiap aktivitas player (connect, login, disconnect, reconnect) dicatat ke file log dengan timestamp. Log bisa diakses dari luar server via HTTP endpoint tanpa perlu SSH.
 
 **CI/CD:** setiap push ke branch `main` otomatis deploy ke DigitalOcean Droplet via GitHub Actions.
 
@@ -202,16 +206,26 @@ curl http://143.198.217.44:5001/logs
 ### Load Test
 
 ```bash
-python3 tools/load_test.py --clients 50
+python3 tools/load_test.py --clients 100
 ```
 
-> [TARUH HASIL LOAD TEST DI SINI]
+Hasil load test terhadap server DigitalOcean Droplet (1 GB RAM, Singapore):
+
+| Clients | Success | Avg Login Latency | Avg Ping RTT |
+|---------|---------|-------------------|--------------|
+| 50 | 50/50 (100%) | 2545.7 ms | 181.0 ms |
+| 100 | 100/100 (100%) | 1292.6 ms | 104.5 ms |
+| 500 (sebelum fix) | 173/500 (34.6%) | 1743.8 ms | 151.6 ms |
+| 500 (sesudah fix) | 500/500 (100%) | 3005.0 ms | 472.8 ms |
+
+Server stabil hingga 100 concurrent client dengan success rate 100%. Pada 500 client, bottleneck awal disebabkan file descriptor limit OS (default 1024) dan SQLite writer starvation. Keduanya diselesaikan dengan menaikkan `LimitNOFILE` di systemd dan mengaktifkan WAL mode pada SQLite.
 
 ### Known Limitations
 
 - **Hunter timeout:** timer 20 detik Hunter pakai `time.sleep()`, tidak bisa di-cancel dari luar
 - **Vote tie:** kalau vote seri, tidak ada yang dieliminasi dan ronde bisa berulang
 - **SQLite concurrency:** koneksi baru per query, tidak pakai connection pool
+- **SQLite WAL mode:** setelah fix, error "database is locked" berkurang drastis tapi masih bisa muncul pada beban sangat tinggi (>500 concurrent writes)
 - **No encryption:** komunikasi client-server tidak dienkripsi (TLS/SSL belum diimplementasi)
 
 ## Screenshot Hasil
