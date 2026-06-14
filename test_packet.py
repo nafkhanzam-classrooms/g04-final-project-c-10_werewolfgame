@@ -5,7 +5,6 @@ import sys
 import time
 
 def listen_for_packets(sock):
-    """Listens for packets from the server and prints them."""
     buffer = ""
     while True:
         try:
@@ -50,7 +49,6 @@ def main():
     print("Type 'exit' to quit.")
     print("Common packet types: login, register, create, join, chat, ready, start, rooms, ping")
     
-    # Examples
     print("\nQuick templates (copy-paste):")
     print('{"type": "register", "username": "alice", "password": "123"}')
     print('{"type": "login", "username": "alice", "password": "123"}')
@@ -69,15 +67,12 @@ def main():
             if not user_input:
                 continue
 
-            # Try to parse to validate JSON before sending
             try:
                 packet_data = json.loads(user_input)
-                # Ensure it's a dict
                 if not isinstance(packet_data, dict):
                     print("[ERROR] Packet must be a JSON object (dict).")
                     continue
-                
-                # Send encoded packet + newline
+
                 encoded_packet = (json.dumps(packet_data) + "\n").encode("utf-8")
                 sock.sendall(encoded_packet)
                 print(f"[SENT] {user_input}")

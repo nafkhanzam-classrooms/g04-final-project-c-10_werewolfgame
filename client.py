@@ -11,8 +11,6 @@ HOST = "143.198.217.44"
 PORT = 5000
 MAX_LINE_BYTES = 64 * 1024
 
-# ── Role metadata ──────────────────────────────────────────────────────────────
-# ASCII-safe role labels that render on any OS/font
 ROLE_ICONS = {
     "Werewolf": "[W]",
     "Seer":     "[S]",
@@ -49,7 +47,7 @@ def _play_sound(name):
         pass
 
 
-# ══════════════════════════════════════════════════════════════════════════════
+# ------------------------------------------------------------------------------
 class NetClient:
     def __init__(self, host, port, packet_queue):
         self.host         = host
@@ -118,7 +116,7 @@ class NetClient:
                 pass
 
 
-# ══════════════════════════════════════════════════════════════════════════════
+# ------------------------------------------------------------------------------
 class WerewolfClient(tk.Tk):
     def __init__(self):
         super().__init__()
@@ -350,9 +348,9 @@ class WerewolfClient(tk.Tk):
         self.switch_frame(GameOverFrame)
 
 
-# ══════════════════════════════════════════════════════════════════════════════
+# ------------------------------------------------------------------------------
 #  Auth Frame
-# ══════════════════════════════════════════════════════════════════════════════
+# ------------------------------------------------------------------------------
 class AuthFrame(tk.Frame):
     def __init__(self, master):
         super().__init__(master, bg=THEMES["lobby"]["bg"])
@@ -404,9 +402,9 @@ class AuthFrame(tk.Frame):
             self.master.net.send({"type": "register", "username": u, "password": p})
 
 
-# ══════════════════════════════════════════════════════════════════════════════
+# ------------------------------------------------------------------------------
 #  Lobby Frame
-# ══════════════════════════════════════════════════════════════════════════════
+# ------------------------------------------------------------------------------
 class LobbyFrame(tk.Frame):
     def __init__(self, master):
         super().__init__(master, bg=THEMES["lobby"]["bg"])
@@ -437,15 +435,15 @@ class LobbyFrame(tk.Frame):
         self.master.net.send({"type": "create", "room": "AUTO"})
 
 
-# ══════════════════════════════════════════════════════════════════════════════
+# ------------------------------------------------------------------------------
 #  Room Lobby Frame
-# ══════════════════════════════════════════════════════════════════════════════
+# ------------------------------------------------------------------------------
 class RoomLobbyFrame(tk.Frame):
     def __init__(self, master):
         super().__init__(master, bg=THEMES["lobby"]["bg"])
         self.master = master
 
-        # ── Header ──
+        # Header
         header = tk.Frame(self, bg=master["bg"])
         header.pack(fill="x", pady=(30, 10), padx=60)
 
@@ -468,7 +466,6 @@ class RoomLobbyFrame(tk.Frame):
                                      font=master.font_header, bg=master["bg"], fg="#e1e1e1")
         self.count_label.pack(side="right")
 
-        # ── Player list — use Listbox for flicker-free updates ──
         list_frame = tk.Frame(self, bg="#16213e", padx=30, pady=20,
                               highlightthickness=2, highlightbackground="#00d2ff")
         list_frame.pack(fill="both", expand=True, padx=60, pady=5)
@@ -476,7 +473,6 @@ class RoomLobbyFrame(tk.Frame):
         tk.Label(list_frame, text="PLAYERS IN LOBBY:", font=master.font_bold,
                  bg="#16213e", fg="#e1e1e1").pack(anchor="w", pady=(0, 10))
 
-        # Listbox — updates items in-place, no flicker
         self.player_listbox = tk.Listbox(
             list_frame,
             font=master.font_bold,
@@ -487,7 +483,7 @@ class RoomLobbyFrame(tk.Frame):
         )
         self.player_listbox.pack(fill="both", expand=True)
 
-        # ── Footer ──
+        # Footer
         self.footer = tk.Frame(self, bg=master["bg"])
         self.footer.pack(fill="x", pady=20, padx=60)
 
@@ -513,7 +509,7 @@ class RoomLobbyFrame(tk.Frame):
         self.after(2000, lambda: self._copy_btn.config(text="  [Copy]", fg="#888888"))
 
     def update_players(self, players):
-        # ── Update listbox in-place (no flicker) ──
+        # Update listbox in-place 
         self.player_listbox.delete(0, tk.END)
 
         ready_count = sum(1 for p in players if p.get("ready"))
@@ -568,9 +564,9 @@ class RoomLobbyFrame(tk.Frame):
         self.master.net.send({"type": "leave"})
 
 
-# ══════════════════════════════════════════════════════════════════════════════
+# ------------------------------------------------------------------------------
 #  Game Frame
-# ══════════════════════════════════════════════════════════════════════════════
+# ------------------------------------------------------------------------------
 class GameFrame(tk.Frame):
     def __init__(self, master):
         super().__init__(master, bg=THEMES["lobby"]["bg"])
@@ -579,7 +575,7 @@ class GameFrame(tk.Frame):
         self._selected_target = None   # username of currently "pressed" button
         self._action_buttons  = {}     # username -> tk.Button
 
-        # ── Top bar ──
+        # Top bar
         self.top_bar = tk.Frame(self, bg="#16213e", height=100)
         self.top_bar.pack(fill="x")
         self.top_bar.pack_propagate(False)
@@ -615,7 +611,7 @@ class GameFrame(tk.Frame):
                                           style="Timer.Horizontal.TProgressbar")
         self.timer_bar.pack(fill="x", expand=True)
 
-        # ── Content ──
+        # Content
         self.content = tk.Frame(self, bg=master["bg"])
         self.content.pack(fill="both", expand=True)
 
@@ -650,7 +646,7 @@ class GameFrame(tk.Frame):
         ttk.Button(input_frame, text="Send", width=10,
                    command=self.send_chat).pack(side="right")
 
-        # Right panel — Listbox for flicker-free player updates
+        # Right panel Listbox for flicker-free player updates
         self.right_frame = tk.Frame(self.content, bg=master["bg"], width=350,
                                      padx=10, pady=20)
         self.right_frame.pack(side="right", fill="y")
@@ -671,7 +667,7 @@ class GameFrame(tk.Frame):
         )
         self.player_listbox.pack(fill="both", expand=True)
 
-        # Action buttons frame — rebuilt only when phase changes
+        # Action buttons frame, rebuilt only when phase changes
         self.action_frame = tk.Frame(self.right_frame, bg=master["bg"])
         self.action_frame.pack(fill="x", pady=(8, 0))
 
@@ -690,7 +686,7 @@ class GameFrame(tk.Frame):
         self.update_players(master.players)
         self.apply_theme(THEMES.get(master.phase, THEMES["lobby"]))
 
-    # ── Theme ──────────────────────────────────────────────────────────────────
+    # Theme ------------------------------------------------------------------------------
     def apply_theme(self, theme):
         self.configure(bg=theme["bg"])
         self.content.configure(bg=theme["bg"])
@@ -730,11 +726,11 @@ class GameFrame(tk.Frame):
                                           highlightbackground="#444444",
                                           selectbackground="#16213e")
 
-    # ── Players — Listbox rows (no flicker) ────────────────────────────────────
+    # Players Listbox rows 
     def update_players(self, players):
         """
         Update the player listbox rows and rebuild action buttons.
-        Listbox.delete+insert is visually smooth — no widget destruction flicker.
+        Listbox.delete+insert is visually smooth, no widget destruction flicker.
         Action buttons are in a separate frame that's only rebuilt on phase change,
         not on every players_list broadcast.
         """
@@ -772,15 +768,6 @@ class GameFrame(tk.Frame):
         self._rebuild_action_buttons(players)
 
     def _rebuild_action_buttons(self, players):
-        """
-        Rebuild action buttons for night/voting phase.
-        Uses tk.Button (not ttk) for full visual control over relief + bg.
-
-        Toggle logic:
-          - Click unpressed  → select (send action, look sunken/cyan)
-          - Click pressed    → cancel (look raised/dark, no new packet)
-          - Click different  → deselect old, select new
-        """
         for w in self.action_frame.winfo_children():
             w.destroy()
         self._action_buttons  = {}
@@ -817,7 +804,7 @@ class GameFrame(tk.Frame):
             if label is None:
                 continue
 
-            # Seer after first check — permanently disabled
+            # Seer after first check, permanently disabled
             if role == "Seer" and self.master.seer_used:
                 tk.Button(btn_row, text=label, width=7,
                           font=self.master.font_small,
@@ -839,7 +826,6 @@ class GameFrame(tk.Frame):
             btn.config(command=lambda u=name, b=btn: self._toggle_action(u, b))
 
     def _toggle_action(self, target, btn):
-        """Press/cancel/switch action buttons."""
         phase = self.master.phase
         role  = self.master.role
 
@@ -869,7 +855,7 @@ class GameFrame(tk.Frame):
                     self.kill(target)
                 elif role == "Seer":
                     self.check(target)
-                    # Seer is one-shot — disable all check buttons
+                    # Seer is one-shot
                     for b in self._action_buttons.values():
                         try:
                             b.config(state="disabled", bg="#333333",
@@ -880,7 +866,6 @@ class GameFrame(tk.Frame):
                     self.protect(target)
 
     def _set_btn_pressed(self, btn, pressed: bool):
-        """Toggle visual pressed state on a tk.Button."""
         if pressed:
             btn.config(relief="sunken", bg="#00d2ff",
                        fg="#000000", activebackground="#00b8d9")
@@ -888,7 +873,7 @@ class GameFrame(tk.Frame):
             btn.config(relief="raised", bg="#2a2a2a",
                        fg="#e1e1e1", activebackground="#444444")
 
-    # ── Timer ──────────────────────────────────────────────────────────────────
+    # Timer ------------------------------------------------------------------------------
     def update_timer(self, seconds):
         sec_int = int(seconds)
         self.timer_label.config(text=f"{sec_int}s")
@@ -909,7 +894,7 @@ class GameFrame(tk.Frame):
         )
         self.timer_bar.update_idletasks()
 
-    # ── Phase ──────────────────────────────────────────────────────────────────
+    # Phase ------------------------------------------------------------------------------
     def update_phase(self, packet):
         phase = packet["phase"]
         self.phase_label.config(text=phase.upper() + " PHASE")
@@ -938,7 +923,7 @@ class GameFrame(tk.Frame):
         color = ROLE_COLORS.get(role, "#00d2ff")
         self.role_label.config(text=f"{icon} {role.upper()}", fg=color)
 
-    # ── Chat ───────────────────────────────────────────────────────────────────
+    # Chat ------------------------------------------------------------------------------
     def add_chat(self, packet):
         sender    = packet.get("sender", "???")
         msg       = packet.get("msg", "")
@@ -991,7 +976,7 @@ class GameFrame(tk.Frame):
         self.master.seer_used = True
         self.update_players(self.master.players)
 
-    # ── Hunter ─────────────────────────────────────────────────────────────────
+    # Hunter ------------------------------------------------------------------------------
     def show_hunter_dialog(self):
         if self._hunter_dialog and self._hunter_dialog.winfo_exists():
             return
@@ -1019,9 +1004,9 @@ class GameFrame(tk.Frame):
             self._hunter_dialog.destroy()
 
 
-# ══════════════════════════════════════════════════════════════════════════════
+# ------------------------------------------------------------------------------
 #  Game Over Frame
-# ══════════════════════════════════════════════════════════════════════════════
+# ------------------------------------------------------------------------------
 class GameOverFrame(tk.Frame):
     def __init__(self, master):
         super().__init__(master, bg=THEMES["ended"]["bg"])

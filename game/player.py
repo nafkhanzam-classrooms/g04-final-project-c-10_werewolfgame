@@ -11,7 +11,7 @@ class Player:
         self.ready     = False
         self.room      = None
         self.connected = True
-        self.last_ping = None   # timestamp of last PING received (for watchdog)
+        self.last_ping = None   # timestamp of last PING received 
 
     def __repr__(self):
         status = "ONLINE" if self.connected else "OFFLINE"

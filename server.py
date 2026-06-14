@@ -159,7 +159,7 @@ class Server:
                     pass
                 return
 
-        # Lobby disconnect — full cleanup
+        # Lobby disconnect
         self.log(
             f"[DISCONNECT] {player.username if player.username else 'Guest'} disconnected"
         )
@@ -170,14 +170,11 @@ class Server:
             pass
 
     def _watchdog_loop(self):
-        """Log a warning for any connected player who hasn't pinged in PING_TIMEOUT seconds.
-        Also purge players who have been offline for more than OFFLINE_TIMEOUT.
-        """
         while True:
             time.sleep(PING_WATCHDOG_INTERVAL)
             now = time.time()
 
-            # 1. Check active connections (logged-in and guest)
+            # Check active connections (logged-in and guest)
             for player in list(self.active_conns.values()):
                 if not player.connected or not player.username:
                     continue
@@ -187,7 +184,7 @@ class Server:
                         f"{int(now - player.last_ping)}s"
                     )
 
-            # 2. Purge offline players from rooms (Reconnect Timeout)
+            # Purge offline players from rooms (Reconnect Timeout)
             for room in list(self.room_manager.rooms.values()):
                 to_purge = []
 
