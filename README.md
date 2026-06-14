@@ -230,4 +230,30 @@ Server stabil hingga 100 concurrent client dengan success rate 100%. Pada 500 cl
 
 ## Screenshot Hasil
 
-> [TARUH SCREENSHOT DI SINI]
+### 1. Lobby Room
+> ![alt text](image/image.png)
+*Menampilkan daftar pemain, status Ready/Unready*
+
+### 2. Night Phase (Werewolf View)
+> ![alt text](<image/image copy.png>)
+*Aksi Werewolf memilih mangsa dalam chat khusus Werewolf.*
+
+### 3. Night Phase (Seer Action)
+> 
+*Tampilan hasil pengecekan peran (Villager/Werewolf) yang muncul secara privat di chat Seer.*
+
+### 4. Day Phase
+> ![alt text](<image/image copy 2.png>)
+*Diskusi terbuka antar pemain untuk mencari Werewolf.*
+
+### 5. Voting Phase
+> ![alt text](<image/image copy 3.png>)
+*Proses pemungutan suara untuk menyingkirkan tersangka.*
+
+### 6. Dead Chat Channel
+> 
+*Pemain yang sudah mati tetap bisa memantau game*
+
+### 7. Game Over (Winner Reveal)
+> 
+*Pengumuman pemenang (Villagers/Werewolf Win)*
