@@ -474,11 +474,10 @@ class PacketHandler:
             room.game.players[target].alive = False
             room.game.eliminated.append(target)
             room.game.hunter_pending = None
-        target_p = room.game.players[target]
-        if target_p.role == Role.VILLAGER:
+        if room.game.players[target].role == Role.VILLAGER:
             self.broadcast(room, {"type": "eliminated", "player": target,
             "role": room.game.players[target].role.value,
-            "msg": f"Hunter {player.username} shot {target}, victim was {target_p.role.value}!"})
+            "msg": f"Hunter {player.username} shot {target}, victim was {room.game.players[target].role.value}!"})
         else:
             self.broadcast(room, {"type": "eliminated", "player": target,
             "role": room.game.players[target].role.value,
